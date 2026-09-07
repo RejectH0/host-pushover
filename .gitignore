@@ -1,0 +1,22 @@
+# Local credentials and configuration; never publish deployed settings.
+.env
+.env.*
+/config
+/apps/
+/private/
+/.local/
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Local update state, backups, and generated artifacts.
+/state/
+/cache/
+/backups/
+/dist/
+*.bak
+*.bak.*
+*.tmp
+__pycache__/
+*.pyc
