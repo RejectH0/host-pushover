@@ -38,7 +38,8 @@ separate from notification environment/configuration initialization.
   receipts, locks, and the verified scheduled checker. Root never executes an
   automatically changing per-user notification script for periodic checks.
 - A failed download or validation preserves the installed script. Successful
-  replacement uses staging on the target filesystem and atomic `mv -T`.
+  replacement uses staging on the target filesystem and atomic rename into the
+  pinned target directory, including with older BusyBox utilities.
   Catchable interruptions clean temporary files and locks. Uncatchable shutdown
   may leave a lock requiring operator review.
 - Managed-file edits are detected using the installed checksum. Legacy files

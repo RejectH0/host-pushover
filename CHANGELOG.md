@@ -34,6 +34,7 @@
 - Exact top-level JSON success parsing, including malformed/ambiguous responses.
 - Standalone command exclusivity, including version, check-in, and update modes.
 - Configuration-backup timestamp failure handling and dependency checks.
+- Atomic updates work with older BusyBox utilities, including version 1.30.
 
 ### Documentation
 
@@ -92,10 +93,9 @@ spellings below are preserved from the original release lineages.
 
 ## Legacy DSM releases
 
-These describe the separately developed DSM lineage. Its features are being
-evaluated for the unified release; the current Debian script does not yet
-include them. `2.03-dsm` must be recognized explicitly by the migration tool,
-rather than compared as an ordinary unified release version.
+These describe the retired DSM lineage, whose features are incorporated in the
+unified release above. The migration tool recognizes `2.03-dsm` explicitly as a
+legacy version eligible for migration to unified `2.0.0`.
 
 ### 2.03-dsm
 

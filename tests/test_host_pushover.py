@@ -444,6 +444,39 @@ class UpdateTests(Fixture):
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
 
+    def test_final_rename_does_not_follow_destination_directory_symlink(self):
+        for utility in ("mv", "busybox"):
+            binary = shutil.which(utility)
+            if not binary: continue
+            with self.subTest(utility=utility):
+                target = self.target()
+                decoy = self.base / ("outside-" + utility)
+                decoy.mkdir()
+                env = dict(self.env, HP_TEST_TARGET=str(target), HP_TEST_DECOY=str(decoy),
+                           HP_TEST_REAL_MV=binary, HP_TEST_MV_KIND=utility)
+                wrapper = self.bin / "mv"
+                wrapper.write_text('''#!/usr/bin/env python3
+import os,sys,subprocess
+from pathlib import Path
+if sys.argv[-1] == ".":
+    target=Path(os.environ["HP_TEST_TARGET"])
+    target.unlink()
+    target.symlink_to(os.environ["HP_TEST_DECOY"])
+command=[os.environ["HP_TEST_REAL_MV"]]
+if os.environ["HP_TEST_MV_KIND"] == "busybox": command.append("mv")
+sys.exit(subprocess.call(command+sys.argv[1:]))
+''')
+                wrapper.chmod(0o755)
+                release = self.release()
+                result = self.command(target, "--update", "--release-dir", release, env=env, success=None)
+                self.assertEqual(list(decoy.iterdir()), [])
+                if result.returncode == 0:
+                    self.assertFalse(target.is_symlink())
+                    self.assertEqual(target.read_bytes(), (release / "host-pushover.sh").read_bytes())
+                target.unlink()
+                wrapper.unlink()
+                shutil.rmtree(self.state)
+
 
 if __name__ == "__main__":
     unittest.main()

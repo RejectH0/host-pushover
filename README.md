@@ -13,7 +13,7 @@ pilot in [docs/ROLLOUT.md](docs/ROLLOUT.md).
 Use Bash 4.4 or newer, curl with working HTTPS certificate validation, and the
 usual Linux command-line tools. Notification delivery uses `awk`, `sed`, `tr`,
 `grep`, `hostname`, `date`, `mktemp`, `cp`, `mkdir`, `chmod`, `rm`, `cat`, and `sleep`.
-Updates additionally require `sha256sum`, `stat -c`, `chown`, `rmdir`, and `mv -T`.
+Updates additionally require `sha256sum`, `stat -c`, `chown`, `rmdir`, and `mv`.
 The Linux `/proc/self/fd` interface pins staging directories during replacement.
 GNU and BusyBox update utilities are exercised by the automated tests. Git,
 GitHub CLI, jq, and Python are **not required on deployed devices**.

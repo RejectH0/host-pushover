@@ -1708,11 +1708,17 @@ hp_number_file() {
     printf '%s\n' "$((10#${value}))"
 }
 
+hp_publish_file() {
+    # This helper is only used inside trusted root-owned state/cron directories.
+    [[ ! -d "$2" ]] || { hp_error 'A metadata destination is unexpectedly a directory.'; return 1; }
+    mv -f -- "$1" "$2"
+}
+
 hp_write_public() {
     local name="$1" value="$2"
     printf '%s\n' "${value}" > "${HP_WORK}/public" || return 1
     chmod 0644 "${HP_WORK}/public" || return 1
-    mv -fT -- "${HP_WORK}/public" "${HP_STATE}/${name}"
+    hp_publish_file "${HP_WORK}/public" "${HP_STATE}/${name}"
 }
 
 hp_status() {
@@ -1771,7 +1777,7 @@ hp_check() {
         return 1
     fi
     chmod 0644 "${HP_WORK}/manifest" || return 1
-    mv -fT -- "${HP_WORK}/manifest" "${HP_STATE}/manifest" || return 1
+    hp_publish_file "${HP_WORK}/manifest" "${HP_STATE}/manifest" || return 1
     hp_write_public etag "${HP_ETAG}" || return 1
     hp_write_public failures 0 || return 1
     hp_write_public last-success "${now}" || return 1
@@ -1805,18 +1811,16 @@ hp_install_file() {
     exec {stage_fd}< "${HP_STAGE}" || return 1
     stage_access="/proc/self/fd/${stage_fd}"
     [[ -d "${stage_access}" && "$(stat -Lc '%u:%a:%d:%i' "${stage_access}")" == "${stage_identity}" ]] || return 1
-    cp -- "${file}" "${stage_access}/new" || return 1
-    chown "${uid}:${gid}" "${stage_access}/new" || return 1
-    chmod "${mode}" "${stage_access}/new" || return 1
+    cp -- "${file}" "${stage_access}/${HP_TARGET##*/}" || return 1
+    chown "${uid}:${gid}" "${stage_access}/${HP_TARGET##*/}" || return 1
+    chmod "${mode}" "${stage_access}/${HP_TARGET##*/}" || return 1
     [[ ! -L "${HP_TARGET_FILE}" && "$(stat -c '%d:%i:%u:%g:%a:%h' "${HP_TARGET_FILE}")" == "${HP_TARGET_META}" && "$(hp_sha256 "${HP_TARGET_FILE}")" == "${expected}" && "$(stat -c '%d:%i' "${HP_TARGET%/*}")" == "${HP_PARENT_ID}" ]] || {
         hp_error 'Target changed during the operation; installation stopped.'; return 1;
     }
-    # -T is supported by GNU and BusyBox mv. Probe it before touching the target.
-    : > "${HP_WORK}/mv-probe"
-    mv -fT -- "${HP_WORK}/mv-probe" "${HP_WORK}/mv-probe-done" || {
-        hp_error 'This platform needs mv with -T for safe replacement.'; return 1;
-    }
-    mv -fT -- "${stage_access}/new" "${HP_TARGET_FILE}" || return 1
+    # Move a source whose basename matches the target into the pinned parent.
+    # Passing the directory (.) avoids treating a replaced destination symlink
+    # as another directory, without requiring GNU/newer-BusyBox mv -T.
+    mv -f -- "${stage_access}/${HP_TARGET##*/}" . || return 1
     exec {stage_fd}<&-
     rmdir -- "${HP_STAGE}" || return 1
     HP_STAGE=""
@@ -1824,9 +1828,9 @@ hp_install_file() {
 
 hp_finish_install() {
     printf '%s\n' "${HP_SHA}" > "${HP_WORK}/receipt" || return 1
-    mv -fT -- "${HP_WORK}/receipt" "${HP_PRIVATE}/installed-sha256" || return 1
+    hp_publish_file "${HP_WORK}/receipt" "${HP_PRIVATE}/installed-sha256" || return 1
     chmod 0700 "${HP_WORK}/candidate" || return 1
-    mv -fT -- "${HP_WORK}/candidate" "${HP_PRIVATE}/checker.sh" || return 1
+    hp_publish_file "${HP_WORK}/candidate" "${HP_PRIVATE}/checker.sh" || return 1
     hp_sync_flag || return 1
     if [[ "${HP_SCHEDULE}" == 1 ]]; then
         hp_schedule || { hp_error 'Script installed, but scheduling failed; run --install-check-schedule to retry.'; return 1; }
@@ -1847,7 +1851,7 @@ hp_write_cron() {
         "${minute}" "${hour}" "${command}" > "${HP_WORK}/cron" || return 1
     # Stage on cron's filesystem before renaming.
     staged="$(mktemp "${cron_dir}/.host-pushover.XXXXXXXXXX")" || return 1
-    if ! cp -- "${HP_WORK}/cron" "${staged}" || ! chmod 0644 "${staged}" || ! mv -fT -- "${staged}" "${cron_path}"; then
+    if ! cp -- "${HP_WORK}/cron" "${staged}" || ! chmod 0644 "${staged}" || ! hp_publish_file "${staged}" "${cron_path}"; then
         rm -f -- "${staged}"
         return 1
     fi
@@ -1907,7 +1911,7 @@ hp_update() {
     chmod 0600 "${HP_PRIVATE}/${backup}" || return 1
     [[ "$(hp_sha256 "${HP_PRIVATE}/${backup}")" == "${original_hash}" ]] || { hp_error 'Target changed before backup completed; installation stopped.'; return 1; }
     printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "${backup}" "${original_hash}" "${HP_SHA}" "${uid}" "${gid}" "${mode}" "${installed}" > "${HP_WORK}/rollback" || return 1
-    mv -fT -- "${HP_WORK}/rollback" "${HP_PRIVATE}/rollback" || return 1
+    hp_publish_file "${HP_WORK}/rollback" "${HP_PRIVATE}/rollback" || return 1
     hp_install_file "${HP_WORK}/candidate" "${uid}" "${gid}" "${mode}" "${original_hash}" || return 1
     printf 'Installed %s. Backup: %s\n' "${HP_VERSION}" "${HP_PRIVATE}/${backup}"
     hp_finish_install
@@ -1932,7 +1936,7 @@ hp_rollback() {
     if [[ "${HP_DRY_RUN}" == 1 ]]; then printf 'Dry run: verified rollback to %s.\n' "${version}"; return 0; fi
     hp_install_file "${HP_PRIVATE}/${backup}" "${uid}" "${gid}" "${mode}" "${current}" || return 1
     printf '%s\n' "${old_hash}" > "${HP_WORK}/receipt" || return 1
-    mv -fT -- "${HP_WORK}/receipt" "${HP_PRIVATE}/installed-sha256" || return 1
+    hp_publish_file "${HP_WORK}/receipt" "${HP_PRIVATE}/installed-sha256" || return 1
     hp_sync_flag || return 1
     printf 'Restored %s; configuration unchanged.\n' "${version}"
 }
