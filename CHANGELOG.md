@@ -1,14 +1,49 @@
 # Changelog
 
-## Unreleased
+## Unreleased (2.0.0)
 
-- Prepare the public repository from the existing `1.04` baseline.
-- Move script usage documentation and release history into Markdown files.
-- Use generic examples and keep private deployment records outside the repository.
-- Record the proposed unified v2.0 update and migration work in `TODO.md`.
+### Added
 
-The current script remains `1.04`. Unified `2.0.0` is planned and has not been
-released. Historical version spellings below are preserved from the source.
+- One runtime script for Debian, Raspberry Pi OS, Ubuntu, and Synology DSM.
+- Automatic platform detection and UID-based DSM home discovery, with explicit
+  profile and resolved-path diagnostics when needed.
+- Shared offline `--version` and explicit `--check-in` commands.
+- Small-manifest GitHub release discovery, conditional requests, daily caching,
+  bounded failure backoff, cached status, and a persistent update-available flag.
+- Explicit root-only updates with fresh metadata, verified HTTPS downloads,
+  SHA-256/version/syntax checks, backups, preserved ownership/modes, locking,
+  atomic replacement, and rollback.
+- A generated bootstrap using the same updater implementation to migrate legacy
+  system and DSM releases, including the separate `2.03-dsm` lineage.
+- Dry-run, pinned releases, offline pilot bundles, local-edit detection, and
+  root-owned scheduled checkers. Bootstrap configures cron where available and
+  prints a daily-task command for DSM or another scheduler.
+- Release builder, draft-release workflow, isolated runtime/update tests, and a
+  Debian/Ubuntu CI matrix with BusyBox update coverage.
+
+### Preserved
+
+- Existing configuration paths, schema, setup questionnaire, permissions,
+  override precedence, callers, and quiet successful delivery.
+- DSM transient-failure retries and their optional configuration variables;
+  system-profile transport still defaults to one attempt.
+- Root updates do not source or rewrite notification configuration.
+
+### Fixed
+
+- Exact top-level JSON success parsing, including malformed/ambiguous responses.
+- Standalone command exclusivity, including version, check-in, and update modes.
+- Configuration-backup timestamp failure handling and dependency checks.
+
+### Documentation
+
+- Public examples use runtime-discovered identities and generic caller names.
+- Usage and release history live in Markdown; private audit data stays outside
+  the repository. Added the pilot, scheduling, and rollback guide.
+
+The script reports `2.0.0`; a stable release has not yet been published. Complete
+real-device pilot validation before publishing the draft. Historical version
+spellings below are preserved from the original release lineages.
 
 ## Debian releases
 

@@ -1,171 +1,91 @@
-# host-pushover.sh
+# host-pushover
 
-Centralized, host-aware Pushover delivery helper for Bash-oriented automation on Debian and Raspberry Pi hosts.
+A shared Pushover notification helper for Debian, Raspberry Pi OS, Ubuntu, and
+Synology DSM. **One `host-pushover.sh` serves every platform.** The legacy DSM
+variant has been absorbed into the unified script.
 
-`host-pushover.sh` is designed to be installed once per host and reused by any local script, cron job, service account, or web application that needs consistent Pushover notification delivery. It separates host-level notification settings from application-specific behavior, preserves quiet-on-success behavior for machine use, and provides an interactive setup workflow for first-time configuration.
+The current development version is **2.0.0**. Release assets can be built and
+piloted locally; a stable GitHub release should be published after the hardware
+pilot in [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
+## Requirements and platform detection
 
-Current script version: `1.04`. This repository is preparing a unified Debian
-and Synology DSM v2.0 release. Update discovery, self-update, and the legacy
-upgrade script are planned in [TODO.md](TODO.md) and are not yet available.
+Use Bash 4.4 or newer, curl with working HTTPS certificate validation, and the
+usual Linux command-line tools. Notification delivery uses `awk`, `sed`, `tr`,
+`grep`, `hostname`, `date`, `mktemp`, `cp`, `mkdir`, `chmod`, `rm`, `cat`, and `sleep`.
+Updates additionally require `sha256sum`, `stat -c`, `chown`, `rmdir`, and `mv -T`.
+The Linux `/proc/self/fd` interface pins staging directories during replacement.
+GNU and BusyBox update utilities are exercised by the automated tests. Git,
+GitHub CLI, jq, and Python are **not required on deployed devices**.
 
-## Goals
+The script detects DSM from standard Synology system files. It does not match a
+specific NAS model, firmware build, username, hostname, home-volume number, or
+CPU architecture. Other Linux systems use the system profile. `--profile system`
+or `--profile dsm` provides an explicit override when needed.
 
-- provide a single reusable Pushover helper per host
-- keep Pushover API details out of application scripts
-- support both interactive human use and non-interactive automation use
-- allow caller-specific overrides without duplicating global credentials
-- keep normal success paths quiet for cron and script-to-script integration
-- use predictable paths and operationally simple configuration
+| Profile | Normal installation | Configuration root | Directory / config modes |
+| --- | --- | --- | --- |
+| System | `/usr/local/bin/host-pushover.sh` | `/usr/local/etc/host-pushover` | `0755` / `0644` |
+| DSM | Executing user's `~/bin/host-pushover.sh` | Executing user's `~/.config/host-pushover` | `0700` / `0600` |
 
-## Target environment
+For DSM, an existing `HOME` must belong to the executing account. Otherwise the
+script resolves that account by UID using the account database, with a local
+passwd-file fallback. It never substitutes a built-in account name. The updater
+uses the explicit installed target and its ownership, independently of `HOME`.
 
-- Debian or Debian-like Linux
-- Raspberry Pi OS
-- Bash
-- `curl`
-
-## Installation
-
-Install the helper to `/usr/local/bin`:
-
-```bash
-install -m 0755 -o root -g root host-pushover.sh /usr/local/bin/host-pushover.sh
-```
-
-The helper uses a host-wide configuration root:
-
-```text
-/usr/local/etc/host-pushover/
-```
-
-That directory contains:
-
-```text
-/usr/local/etc/host-pushover/config
-/usr/local/etc/host-pushover/apps/
-```
-
-## Configuration model
-
-### Global per-host configuration
-
-The global configuration file applies to every caller on that host unless a caller-specific override changes selected behavior.
-
-Path:
-
-```text
-/usr/local/etc/host-pushover/config
-```
-
-This file contains values such as:
-
-- whether Pushover is enabled at all on the host
-- the Pushover API and validation endpoints
-- the Pushover application token
-- the Pushover recipient user or group key
-- the default device override, if any
-- the default sound override, if any
-- curl timeout values
-- the host label used in notification titles
-
-### Caller-specific override files
-
-Optional caller-specific overrides live here:
-
-```text
-/usr/local/etc/host-pushover/apps/<caller>.conf
-```
-
-`<caller>` is the exact value supplied with `--caller`.
-
-Example:
+Inspect the actual runtime environment without loading configuration or making
+network requests:
 
 ```bash
-/usr/local/bin/host-pushover.sh --caller ups-monitor --level err --message "UPS switched to battery"
+bash host-pushover.sh --version
+bash host-pushover.sh --paths
 ```
 
-This call will cause the helper to look for:
+`--version` also works when `HOME` is absent. `--paths` reports the profile,
+execution UID, and resolved configuration paths. Run it in the scheduler's
+execution context when diagnosing a DSM task.
 
-```text
-/usr/local/etc/host-pushover/apps/ups-monitor.conf
-```
+## Installation and existing installations
 
-If the file exists, it is loaded after the global config and can override caller-specific behavior. If it does not exist, the helper simply uses the global host configuration.
-
-## Configuration precedence
-
-The effective configuration is built in this order:
-
-1. built-in script defaults
-2. global host config from `/usr/local/etc/host-pushover/config`
-3. optional caller-specific overrides from `/usr/local/etc/host-pushover/apps/<caller>.conf`
-4. runtime flags such as `--title` and `--force-send`
-
-## Interactive first-run behavior
-
-The helper distinguishes between interactive terminal use and non-interactive execution.
-
-### If run interactively with no arguments
-
-- if the global config already exists, the helper prints guidance telling the user to run `--help`
-- if the global config does not yet exist, the helper enters the normal missing-config prompt flow and asks whether it should create the config now
-- blank confirmation input defaults to `Yes`
-
-### If run interactively with a real command and config is missing
-
-The helper explains that the config is missing and asks whether it should create the config now. If the user accepts, it launches the interactive setup workflow.
-
-### If run non-interactively and config is missing
-
-The helper exits non-zero and prints a clear error telling the operator that the global config is missing and that the helper cannot proceed until setup is completed.
-
-This is important for cron jobs, services, PHP-FPM pools, CGI users, and similar automation paths where the helper cannot safely prompt.
-
-## Interactive setup workflow
-
-Setup is available explicitly with:
+For a **new system installation**:
 
 ```bash
-/usr/local/bin/host-pushover.sh --setup
+sudo install -m 0755 host-pushover.sh /usr/local/bin/host-pushover.sh
+sudo /usr/local/bin/host-pushover.sh --setup
 ```
 
-The current setup workflow is intended for manual terminal use and includes:
-
-- ANSI color when an interactive terminal is detected
-- a security notice before sensitive input begins
-- visible input instead of hidden input, so paste and correction behavior are normal
-- numbered question progress, such as `[1 of 7]`
-- per-answer confirmation before moving to the next question
-- a final review screen where individual answers can be edited before the file is written
-- a final prompt asking whether a test message should be sent
-
-The current questionnaire collects seven values:
-
-1. Pushover application token
-2. Pushover user or group key
-3. default device name
-4. default sound override
-5. curl connect timeout in seconds
-6. curl max time in seconds
-7. host label used in notification titles
-
-If a config file already exists, setup first loads it and uses the existing values as defaults.
-
-If a config file already exists when setup writes a new one, the previous file is backed up with a timestamped `.bak.YYYYMMDD_HHMMSS` suffix.
-
-## Global config file format
-
-The global config is a Bash-style sourced config file made of variable assignments.
-
-Representative example:
+For a **new DSM installation**, run these as the intended notification account:
 
 ```bash
-#------------------------------------------------------------------------------
-# host-pushover.sh global configuration
-# Generated locally by the interactive setup wizard
-#------------------------------------------------------------------------------
+mkdir -p "$HOME/bin"
+install -m 0750 host-pushover.sh "$HOME/bin/host-pushover.sh"
+/bin/bash "$HOME/bin/host-pushover.sh" --setup
+```
 
+For an **existing installation**, use the bootstrap procedure in
+[docs/ROLLOUT.md](docs/ROLLOUT.md). It migrates both legacy release lineages,
+including `1.04` and `2.03-dsm`. Keep the existing invocation path. Do not rerun
+setup to upgrade: the configuration files and their permissions stay intact.
+
+## Configuration
+
+Each profile uses `config` and optional `apps/<caller>.conf` beneath its existing
+configuration root. These are Bash variable-assignment files. Precedence remains:
+
+1. Built-in defaults.
+2. Global configuration.
+3. Optional caller-specific configuration.
+4. Applicable command-line options, such as an explicit title or forced delivery.
+
+The interactive `--setup` questionnaire, confirmation/review flow, timestamped
+configuration backup, and optional test message are retained. It asks for the
+application token, recipient key, device, sound, connection timeout, request
+limit, and host label. A blank host label enables runtime hostname discovery.
+Run system setup as root and DSM setup as the notification account.
+
+Example global settings (placeholders only):
+
+```bash
 PUSHOVER_ENABLED=true
 PUSHOVER_API_URL='https://api.pushover.net/1/messages.json'
 PUSHOVER_VALIDATE_URL='https://api.pushover.net/1/users/validate.json'
@@ -176,228 +96,167 @@ PUSHOVER_PRIORITY='0'
 PUSHOVER_SOUND=''
 PUSHOVER_CONNECT_TIMEOUT='10'
 PUSHOVER_MAX_TIME='30'
-PUSHOVER_HOST_LABEL=''  # Discover the hostname at runtime
+PUSHOVER_HOST_LABEL=''
 ```
 
-## Caller-specific `.conf` file format
-
-Caller-specific override files are also Bash-style sourced config files.
-
-They are intended only for app-level behavior changes. They do not normally replace the shared application token or recipient key, because those are already defined in the host-wide global config.
-
-Typical override variables are:
-
-- `APP_PUSHOVER_ENABLED`
-- `APP_PUSHOVER_DEBUG`
-- `APP_PUSHOVER_TITLE_PREFIX`
-- `APP_PUSHOVER_FAILURE_PRIORITY`
-- `APP_PUSHOVER_DEBUG_PRIORITY`
-- `APP_PUSHOVER_SOUND`
-- `APP_PUSHOVER_DEVICE`
-
-Example:
+Caller-specific files retain the existing variables:
 
 ```bash
-# /usr/local/etc/host-pushover/apps/ups-monitor.conf
-APP_PUSHOVER_ENABLED="true"
-APP_PUSHOVER_DEBUG="false"
-APP_PUSHOVER_TITLE_PREFIX="UPS monitor"
-APP_PUSHOVER_FAILURE_PRIORITY="1"
-APP_PUSHOVER_DEBUG_PRIORITY="0"
-APP_PUSHOVER_SOUND="siren"
-APP_PUSHOVER_DEVICE="iphone"
+# apps/backup-job.conf
+APP_PUSHOVER_ENABLED=true
+APP_PUSHOVER_DEBUG=false
+APP_PUSHOVER_TITLE_PREFIX='Backups'
+APP_PUSHOVER_FAILURE_PRIORITY=1
+APP_PUSHOVER_DEBUG_PRIORITY=0
+APP_PUSHOVER_SOUND=''
+APP_PUSHOVER_DEVICE=''
 ```
 
-## Why `apps/<caller>.conf` is useful
+The caller name accepts letters, digits, dots, underscores, and hyphens. Missing
+caller configuration uses the defaults. `PUSHOVER_HOST_LABEL` overrides hostname
+discovery when deliberately set; otherwise the script tries `hostname -s`, then
+`hostname`, then `unknown-host`.
 
-A caller-specific override file is useful when one application on a host should behave differently from the default behavior used by the rest of the host.
+DSM retains six total transport attempts with exponential delays of 5, 10, 20,
+30, and 30 seconds. System hosts retain one attempt by default. The existing
+optional `PUSHOVER_RETRY_ATTEMPTS`, `PUSHOVER_RETRY_INITIAL_DELAY`, and
+`PUSHOVER_RETRY_MAX_DELAY` settings are accepted on either profile. Retries cover
+transient DNS/connection failures and selected HTTP errors; permanent API errors
+are not retried. A timeout after an accepted POST can result in a duplicate
+notification on retry. Retry settings do not govern GitHub update checks.
 
-Common cases:
+No updater settings, tokens, or state are written to Pushover configuration.
 
-- one caller should use a different sound
-- one caller should target a different device
-- one caller should temporarily mirror non-error notifications during development or testing
-- one caller should be disabled without affecting the rest of the host
-- one caller should prepend a friendlier title prefix in notifications
-
-### UPS monitor use case
-
-Yes, UPS monitor is a good fit for a caller-specific config file.
-
-Example call from UPS monitor:
+## Sending notifications
 
 ```bash
-/usr/local/bin/host-pushover.sh --caller ups-monitor --level err --message "UPS switched to battery"
+host-pushover.sh --caller backup-job --level err --message 'Backup failed'
+host-pushover.sh --caller backup-job --force-send --level info --message 'Backup completed'
+host-pushover.sh --caller backup-job --validate
+host-pushover.sh --test
+host-pushover.sh --check-in
 ```
 
-Possible reasons to add `/usr/local/etc/host-pushover/apps/ups-monitor.conf`:
+Normal successful delivery is quiet. Error-level notifications are sent by
+default; other levels follow the existing debug-mirroring policy unless forced.
+Global/per-caller enable flags remain effective for normal sends. Validation,
+setup, and explicit test/health commands provide their own feedback.
 
-- power events should use a distinctive sound
-- UPS alerts should be routed to a specific phone or tablet
-- the notification title should read `UPS monitor [<detected-host>] ups-monitor [FAILURE]`
-- debug notifications should be enabled temporarily while you test the web interface
+`--check-in` validates the global configuration and explicitly sends a forced
+health notice containing the version, detected host label, timestamp, and
+validation result. `--test` retains its original behavior. Both commands send
+real notifications; automated tests use a closed network stub instead.
 
-If UPS monitor does not need any special behavior, it can still use `--caller ups-monitor` without having any caller-specific config file at all.
+Use `--title` for an explicit title. Without it, titles include the detected
+host, caller, optional caller prefix, and level. The script preserves the
+existing configuration precedence and message-routing behavior.
 
-## Usage patterns
+Interactive invocation without arguments offers setup if configuration is
+missing, or prints guidance and cached update status if it exists. A
+non-interactive invocation never starts the questionnaire. Conflicting standalone
+commands are rejected. Failures return nonzero; successful sends and deliberate
+policy-based skips return zero.
 
-### Setup
+## Update checks and installation
+
+Update discovery and installation are separate commands:
 
 ```bash
-/usr/local/bin/host-pushover.sh --setup
+sudo host-pushover.sh --check-update
+host-pushover.sh --update-status
+sudo host-pushover.sh --check-update --refresh
+sudo host-pushover.sh --update --dry-run
+sudo host-pushover.sh --update
 ```
 
-### Validate global config only
+Checks fetch a **184-byte manifest** from the public repository's latest stable
+release. HTTP headers, redirects, and TLS add to the transferred bytes. Cached
+ETags support `304 Not Modified`. The default successful-check interval is
+24 hours; failed attempts use bounded backoff. `--refresh` deliberately bypasses
+the interval. Message delivery never queries GitHub or waits for an update check.
+
+A root-owned state directory records the manifest, check times, retry state, and
+an `update-available` flag containing the newer version. The flag is separate
+from Pushover configuration. `--update-status` compares the installed version
+with the cached version and reports whether the cache is fresh, stale, or
+unknown. A failed check preserves the last known version and marks it stale.
+
+Root must explicitly invoke `--update` to install. It obtains fresh metadata,
+downloads the version-specific release asset, validates its checksum, Bash
+syntax, and embedded version, backs up the installed script, and atomically
+replaces it while preserving ownership and mode. Installation never sources
+notification configuration. Release downloads require no GitHub credentials.
+
+For a DSM user installation, expand the existing target path before `sudo`:
 
 ```bash
-/usr/local/bin/host-pushover.sh --validate
+sudo /bin/bash "$HOME/bin/host-pushover.sh" --update
 ```
 
-### Validate with a caller-specific override
+Updater state defaults to `/var/lib/host-pushover/<target-path-hash>`. Use
+`--state-dir` consistently if a different root-owned persistent location is
+needed. Its directory ancestry must be trusted; user-writable directories and
+symlinks are refused. The private subdirectory contains backups and a verified,
+root-owned copy used by scheduled checks. Root never runs a mutable per-user
+script automatically for its daily checks.
+
+The bootstrap installs a daily cron job when a compatible cron installation is
+available. On DSM it prints the command for a separate daily task running as
+root in Task Scheduler. The existing boot-notification task is unchanged. On
+systems without a detected cron installation, it prints an equivalent scheduling
+command. Repeat scheduling setup with:
 
 ```bash
-/usr/local/bin/host-pushover.sh --caller ups-monitor --validate
+sudo host-pushover.sh --install-check-schedule
 ```
 
-### Send a test message with the current config
+A lock serializes operations on each target. Normal signal interruption cleans
+up temporary files and the lock. After an uncatchable termination or power loss,
+a stale lock can remain: use the reported lock path, confirm its recorded PID is
+not running, and remove that lock directory as root before retrying. Do not
+remove a live process's lock.
+
+Local edits to a managed script are detected using its recorded checksum.
+`--allow-modified` explicitly permits replacement after review. A legacy or
+unmanaged installation has no authoritative stored baseline checksum; its
+original bytes are retained in the backup. Final script symlinks and multiple
+hard links are refused, while directory aliases are resolved consistently.
+Downgrades are refused; use the recorded rollback procedure instead.
+
+HTTPS and the selected public repository are the release trust boundary. A
+checksum from the same release detects corruption or mixed assets; it does not
+provide independent publisher authentication. Keep release publication access
+restricted and use immutable GitHub releases. No downloaded manifest is ever
+executed as shell code.
+
+## Development, privacy, and releases
 
 ```bash
-/usr/local/bin/host-pushover.sh --test
+bash scripts/check.sh
+sudo python3 -m unittest discover -s tests -v
 ```
 
-### Send a test message for a specific caller
+The first command builds `dist/`, checks Bash syntax and ShellCheck, and runs the
+unprivileged tests. The second runs isolated root installation tests using only
+temporary targets and synthetic network/configuration data. The CI matrix covers
+Debian Bookworm/Trixie and Ubuntu 22.04/24.04, with additional BusyBox utility
+checks. Actual NAS and Raspberry Pi hardware pilots remain separate.
 
-```bash
-/usr/local/bin/host-pushover.sh --test --caller ups-monitor
-```
+`python3 scripts/build-release.py` produces the runtime script, a standalone
+bootstrap generated from the same updater functions, `update-manifest.txt`, and
+`SHA256SUMS`. The **Prepare release draft** GitHub Actions workflow runs the test
+matrix and attaches these assets to an unpublished draft. Publish the stable
+release only after the pilot. GitHub documents the
+[latest-release asset endpoint](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
+and [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
 
-### Send a normal error notification
+Do not commit real hostnames, usernames, private paths, addresses, credentials,
+SSH keys, or deployment inventories. Use synthetic examples and keep local
+records outside the repository. Public service endpoints, the release repository,
+and standard platform paths are intentional constants; deployment identities
+are resolved at runtime. See [AGENTS.md](AGENTS.md).
 
-```bash
-/usr/local/bin/host-pushover.sh --caller ups-monitor --level err --message "UPS battery is low"
-```
-
-### Send a forced informational notification
-
-```bash
-/usr/local/bin/host-pushover.sh --caller dns-updater --force-send --level info --message "Public IP changed"
-```
-
-## Normal send policy
-
-The helper intentionally keeps the default notification policy conservative.
-
-- `err` is always eligible to send when notifications are enabled and the config is complete
-- non-error levels send only when `APP_PUSHOVER_DEBUG=true` for that caller, or when `--force-send` is used
-- if Pushover is disabled or the config is incomplete, normal sends are suppressed
-- successful normal sends print nothing
-- real helper failures return non-zero and write diagnostics to stderr
-
-This makes the helper safe for cron jobs and script-to-script use.
-
-## Title behavior
-
-If `--title` is not supplied, the helper automatically builds a title.
-
-Base title logic:
-
-- if `APP_PUSHOVER_TITLE_PREFIX` is set: `<prefix> [<host-label>] <caller>`
-- otherwise: `[<host-label>] <caller>`
-
-The helper then appends a suffix based on the level, such as:
-
-- `[FAILURE]`
-- `[WARNING]`
-- `[NOTICE]`
-- `[OK]`
-- `[INFO]`
-
-Host label resolution order:
-
-1. `PUSHOVER_HOST_LABEL` from config
-2. `hostname -s`
-3. `hostname`
-4. `unknown-host`
-
-## Dependency requirements
-
-The helper expects these commands to be available:
-
-- `curl`
-- `sed`
-- `tr`
-- `mktemp`
-- `grep`
-- `hostname`
-- `date`
-- `cp`
-
-## File permissions and operational model
-
-The script itself is typically installed as:
-
-```text
-/usr/local/bin/host-pushover.sh
-```
-
-Recommended script mode:
-
-```text
-0755
-```
-
-The current setup workflow writes the global config with mode:
-
-```text
-0644
-```
-
-That choice allows non-root service accounts and application users to read the global config and use the helper. If you later decide to tighten permissions, you can move to a group-readable model, but that is an operational choice outside the script’s current defaults.
-
-## Exit behavior
-
-- `0` on successful validation, successful setup, successful test send, or successful normal send
-- non-zero on actual helper failures, such as missing unreadable config, malformed config, validation failures, or Pushover API delivery failures
-- a normal send that is intentionally skipped due to disabled or incomplete config remains quiet unless the helper itself must report a real failure condition
-
-## Repository workflow model
-
-This project is intended to fit the following operational pattern:
-
-- maintain the Git working tree in a directory owned by your development account
-- install the production helper to `/usr/local/bin/host-pushover.sh`
-- keep the README up to date as the script evolves
-- optionally distribute the helper to other hosts with Ansible or another deployment tool
-- run setup on first installation; preserve existing configuration when upgrading
-
-## Project documentation and privacy
-
-- [CHANGELOG.md](CHANGELOG.md) records completed changes and legacy release history.
-- [TODO.md](TODO.md) tracks proposed features, planned bug fixes, and rollout work.
-- [docs/AUDIT.md](docs/AUDIT.md) explains the v2.0 design and compatibility findings.
-
-Keep Pushover credentials, real hostnames, account-specific paths, private
-addresses, SSH keys, deployment inventories, and local audit records outside
-this public repository. Examples use generic caller names and discover the
-hostname at runtime. Standard installation paths remain part of the supported
-configuration contract.
-
-## Recommended caller integration pattern
-
-A calling script should normally:
-
-1. choose a stable caller name
-2. invoke the helper with that caller name every time
-3. send `err` for actionable failures
-4. use `--force-send` only for important informational events that should bypass the normal conservative send policy
-5. add a caller-specific override file only when that application needs behavior different from the host default
-
-Representative example:
-
-```bash
-/usr/local/bin/host-pushover.sh \
-  --caller dns-updater \
-  --force-send \
-  --level info \
-  --message "Public IP changed"
-```
+- [CHANGELOG.md](CHANGELOG.md): completed changes and historical versions.
+- [TODO.md](TODO.md): remaining validation and future work.
+- [docs/AUDIT.md](docs/AUDIT.md): design findings and implementation scope.
+- [docs/ROLLOUT.md](docs/ROLLOUT.md): migration, scheduling, and rollback.

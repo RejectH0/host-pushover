@@ -4,13 +4,27 @@
 
 set -u
 set -o pipefail
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+    printf 'host-pushover requires Bash 4.4 or newer.\n' >&2
+    exit 1
+fi
 
 readonly SCRIPT_NAME="host-pushover.sh"
-readonly SCRIPT_VERSION="1.04"
+readonly SCRIPT_VERSION="2.0.0"
 
-readonly CONFIG_ROOT_DIR="/usr/local/etc/host-pushover"
-readonly CONFIG_FILE="${CONFIG_ROOT_DIR}/config"
-readonly APPS_DIR="${CONFIG_ROOT_DIR}/apps"
+readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
+PROFILE="auto"
+CONFIG_ROOT_DIR=""
+CONFIG_FILE=""
+APPS_DIR=""
+CONFIG_DIR_MODE="0755"
+CONFIG_FILE_MODE="0644"
+DO_VERSION=0
+DO_CHECK_IN=0
+DO_PATHS=0
+DO_HELP=0
+UPDATE_MODE=""
+UPDATE_ARGS=()
 
 #-----------------------------#
 # Defaults (overridden by config)
@@ -26,6 +40,9 @@ PUSHOVER_SOUND=""
 PUSHOVER_CONNECT_TIMEOUT="10"
 PUSHOVER_MAX_TIME="30"
 PUSHOVER_HOST_LABEL=""
+PUSHOVER_RETRY_ATTEMPTS="1"
+PUSHOVER_RETRY_INITIAL_DELAY="5"
+PUSHOVER_RETRY_MAX_DELAY="30"
 
 APP_PUSHOVER_ENABLED="true"
 APP_PUSHOVER_DEBUG="false"
@@ -92,6 +109,64 @@ fi
 #-----------------------------#
 # Utility functions
 #-----------------------------#
+detect_profile() {
+    # File markers are independent of DSM model, version, architecture, and user.
+    local etc_dir="${1:-/etc}"
+    if [[ -f "${etc_dir}/synoinfo.conf" || -f "${etc_dir}.defaults/synoinfo.conf" ]]; then
+        printf 'dsm\n'
+    else
+        printf 'system\n'
+    fi
+}
+
+resolve_effective_home() {
+    local _account _unused account_uid _account_gid _gecos account_home _account_shell
+    # Do not accept a scheduler's inherited HOME belonging to another account.
+    if [[ -n "${HOME:-}" && "${HOME}" == /* && -d "${HOME}" && -O "${HOME}" ]]; then
+        printf '%s\n' "${HOME}"
+        return 0
+    fi
+    if command -v getent >/dev/null 2>&1; then
+        IFS=: read -r _account _unused account_uid _account_gid _gecos account_home _account_shell \
+            < <(getent passwd "${EUID}")
+        if [[ "${account_uid:-}" == "${EUID}" && "${account_home:-}" == /* && -d "${account_home}" ]]; then
+            printf '%s\n' "${account_home}"
+            return 0
+        fi
+    fi
+    while IFS=: read -r _account _unused account_uid _account_gid _gecos account_home _account_shell; do
+        if [[ "${account_uid}" == "${EUID}" && "${account_home}" == /* && -d "${account_home}" ]]; then
+            printf '%s\n' "${account_home}"
+            return 0
+        fi
+    done < /etc/passwd
+    printf 'Cannot resolve a home directory for the executing UID.\n' >&2
+    return 1
+}
+
+initialize_profile() {
+    if [[ "${PROFILE}" == auto ]]; then
+        PROFILE="$(detect_profile /etc)" || return 1
+    fi
+    case "${PROFILE}" in
+        system)
+            CONFIG_ROOT_DIR="/usr/local/etc/host-pushover"
+            ;;
+        dsm)
+            local effective_home
+            effective_home="$(resolve_effective_home)" || return 1
+            CONFIG_ROOT_DIR="${effective_home}/.config/host-pushover"
+            CONFIG_DIR_MODE="0700"
+            CONFIG_FILE_MODE="0600"
+            PUSHOVER_RETRY_ATTEMPTS="6"
+            umask 077
+            ;;
+        *) printf 'Unknown profile: %s\n' "${PROFILE}" >&2; return 1 ;;
+    esac
+    CONFIG_FILE="${CONFIG_ROOT_DIR}/config"
+    APPS_DIR="${CONFIG_ROOT_DIR}/apps"
+}
+
 usage() {
     cat <<EOF2
 Usage:
@@ -99,6 +174,11 @@ Usage:
   ${SCRIPT_NAME} --caller <name> --validate
   ${SCRIPT_NAME} --validate
   ${SCRIPT_NAME} --test [--caller <name>] [--title <text>] [--message <text>]
+  ${SCRIPT_NAME} --version | --paths | --check-in
+  ${SCRIPT_NAME} --check-update [--refresh] [--target <path>]
+  ${SCRIPT_NAME} --update-status [--target <path>]
+  ${SCRIPT_NAME} --update [--dry-run] [--target <path>]
+  ${SCRIPT_NAME} --rollback [--dry-run] [--target <path>]
   ${SCRIPT_NAME} --caller <name> --level <level> --message <text>
   ${SCRIPT_NAME} --caller <name> --force-send --level <level> --message <text>
 
@@ -110,14 +190,27 @@ Options:
   --title       Optional explicit title override
   --validate    Validate effective configuration
   --test        Send a manual test message using the current configuration
+  --check-in    Validate configuration and send a versioned health notice
+  --version     Print the version without configuration or network access
+  --paths       Print the detected profile, execution UID, and configuration paths
+  --profile     auto (default), system, or dsm; normally detected automatically
+  --check-update  Root: check GitHub, using the daily cache unless --refresh
+  --update-status  Read cached update status without network access
+  --update      Root: verify, back up, and install a newer release
+  --rollback    Root: restore the previous managed backup
+  --install-check-schedule  Root: install a daily check or print DSM task instructions
+  --target      Installed script path; defaults to this script
+  --state-dir   Updater state root; defaults to /var/lib/host-pushover
+  --release     Pin an update to a stable version, e.g. 2.0.0
+  --release-dir Use a locally prepared release bundle instead of GitHub
+  --dry-run     Verify an update or rollback without replacing the installed file
+  --allow-modified  Explicitly permit replacing a locally modified managed script
   --force-send  Force delivery even if the level would normally be skipped
   --help        Show this help
 
-Global config:
-  ${CONFIG_FILE}
-
-Per-application overrides:
-  ${APPS_DIR}/<caller>.conf
+Configuration (use --paths to see the resolved locations):
+  system: /usr/local/etc/host-pushover/{config,apps/<caller>.conf}
+  dsm:    <executing-user-home>/.config/host-pushover/{config,apps/<caller>.conf}
 
 Notes:
   - If the script is run interactively with no arguments and config exists,
@@ -126,8 +219,8 @@ Notes:
     missing, it can offer to create the config immediately.
   - If the global config is missing during any other interactive command run,
     the script can offer to create it immediately.
-  - Initial setup usually must be run as root so the system-wide config can
-    be written under /usr/local/etc.
+  - Use root for system-profile setup and the notification account for DSM setup.
+  - Update checks are scheduled separately; message delivery never queries GitHub.
 EOF2
 }
 
@@ -229,20 +322,23 @@ print_missing_config_guidance() {
     printf 'This helper cannot run until the per-host global config exists.\n' >&2
     printf 'Initialize it with: %s --setup\n' "$(script_command_hint)" >&2
     printf 'Optional per-application overrides live in: %s/<caller>.conf\n' "${APPS_DIR}" >&2
-    printf 'Because the config is stored under /usr/local/etc, initial setup usually must be run as root.\n' >&2
+    printf 'Run setup as the account that will use this configuration (root for the system profile).\n' >&2
     return 0
 }
 
 print_help_guidance() {
     printf 'No arguments were provided.\n' >&2
     printf 'For usage information, run: %s --help\n' "$(script_command_hint)" >&2
+    if [[ "${INTERACTIVE}" == 1 ]]; then
+        hp_main status --target "${SCRIPT_PATH}" 2>/dev/null || true
+    fi
     return 0
 }
 
 ensure_config_directories() {
     mkdir -p "${CONFIG_ROOT_DIR}" "${APPS_DIR}" || return 1
-    chmod 0755 "${CONFIG_ROOT_DIR}" || return 1
-    chmod 0755 "${APPS_DIR}" || return 1
+    chmod "${CONFIG_DIR_MODE}" "${CONFIG_ROOT_DIR}" || return 1
+    chmod "${CONFIG_DIR_MODE}" "${APPS_DIR}" || return 1
 }
 
 load_global_config() {
@@ -306,7 +402,7 @@ load_app_config() {
 require_dependencies() {
     local missing=()
 
-    for cmd in curl sed tr mktemp grep hostname date cp; do
+    for cmd in curl sed tr mktemp grep hostname date cp mkdir chmod rm cat sleep awk; do
         if ! is_command_available "${cmd}"; then
             missing+=("${cmd}")
         fi
@@ -458,41 +554,175 @@ should_send_for_level() {
     esac
 }
 
+is_transient_curl_exit() {
+    case "${1:-}" in
+        5|6|7|18|28|35|47|52|55|56)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+is_transient_http_code() {
+    case "${1:-}" in
+        408|425|429|500|502|503|504)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+normalized_positive_integer() {
+    local value="${1:-}"
+    local fallback="$2"
+
+    if [[ "${value}" =~ ^[1-9][0-9]*$ ]]; then
+        printf '%s\n' "${value}"
+    else
+        printf '%s\n' "${fallback}"
+    fi
+}
+
 post_urlencoded() {
     local endpoint="$1"
     shift
 
-    local response_file=""
-    if ! response_file="$(mktemp)"; then
-        printf '\n1\nmktemp failed while preparing Pushover request\n'
-        return 0
-    fi
+    local attempts initial_delay max_delay
+    attempts="$(normalized_positive_integer "${PUSHOVER_RETRY_ATTEMPTS:-}" "1")"
+    initial_delay="$(normalized_positive_integer "${PUSHOVER_RETRY_INITIAL_DELAY:-}" "5")"
+    max_delay="$(normalized_positive_integer "${PUSHOVER_RETRY_MAX_DELAY:-}" "30")"
 
+    local attempt=1
+    local delay="${initial_delay}"
+    local response_file=""
     local http_code=""
     local curl_exit=0
-    http_code="$(
-        curl -sS \
-            --connect-timeout "${PUSHOVER_CONNECT_TIMEOUT}" \
-            --max-time "${PUSHOVER_MAX_TIME}" \
-            --output "${response_file}" \
-            --write-out '%{http_code}' \
-            "$@" \
-            "${endpoint}"
-    )"
-    curl_exit=$?
-
     local response_body=""
-    if [[ -f "${response_file}" ]]; then
-        response_body="$(tr -d '\r' < "${response_file}")"
-        rm -f "${response_file}"
-    fi
+    local should_retry=0
 
+    while (( attempt <= attempts )); do
+        response_file=""
+        if ! response_file="$(mktemp)"; then
+            printf '\n1\nmktemp failed while preparing Pushover request\n'
+            return 0
+        fi
+
+        http_code="$(
+            curl -sS \
+                --connect-timeout "${PUSHOVER_CONNECT_TIMEOUT}" \
+                --max-time "${PUSHOVER_MAX_TIME}" \
+                --output "${response_file}" \
+                --write-out '%{http_code}' \
+                "$@" \
+                "${endpoint}"
+        )"
+        curl_exit=$?
+
+        response_body=""
+        if [[ -f "${response_file}" ]]; then
+            response_body="$(tr -d '\r' < "${response_file}")"
+            rm -f "${response_file}"
+        fi
+
+        should_retry=0
+
+        if [[ "${curl_exit}" -ne 0 ]] && is_transient_curl_exit "${curl_exit}"; then
+            should_retry=1
+        elif [[ "${curl_exit}" -eq 0 ]] && is_transient_http_code "${http_code}"; then
+            should_retry=1
+        fi
+
+        if [[ "${should_retry}" -eq 0 || "${attempt}" -ge "${attempts}" ]]; then
+            printf '%s\n%s\n%s\n' "${http_code}" "${curl_exit}" "${response_body}"
+            return 0
+        fi
+
+        log_warn "Transient Pushover transport failure on attempt ${attempt}/${attempts}: $(response_summary "${http_code}" "${curl_exit}" "${response_body}" | tr -d '\n')"
+        log_notice "Retrying Pushover request in ${delay} seconds."
+
+        sleep "${delay}"
+
+        delay=$(( delay * 2 ))
+        if (( delay > max_delay )); then
+            delay="${max_delay}"
+        fi
+
+        attempt=$(( attempt + 1 ))
+    done
+
+    # Defensive fallback; the loop should always return above.
     printf '%s\n%s\n%s\n' "${http_code}" "${curl_exit}" "${response_body}"
 }
 
 json_status_is_success() {
-    local response_body="$1"
-    printf '%s' "${response_body}" | tr -d '[:space:]' | grep -q '"status":1'
+    # Parse JSON with POSIX awk rather than matching status text inside another
+    # number, a nested object, or an error string. No jq/Python runtime is needed.
+    printf '%s' "$1" | awk '
+        function ws() { while (substr(s,p,1) ~ /^[ \t\r\n]$/) p++ }
+        function str(    c,e,out,h) {
+            if (substr(s,p++,1) != "\"") { bad=1; return "" }
+            out=""
+            while (p <= length(s)) {
+                c=substr(s,p++,1)
+                if (c == "\"") return out
+                if (c ~ /[[:cntrl:]]/) { bad=1; return "" }
+                if (c == "\\") {
+                    e=substr(s,p++,1)
+                    if (e == "u") {
+                        h=substr(s,p,4)
+                        if (length(h)!=4 || h ~ /[^0-9a-fA-F]/) { bad=1; return "" }
+                        p+=4
+                        out=out "?"
+                    } else if (e ~ /^["\\\/bfnrt]$/) out=out "?"
+                    else { bad=1; return "" }
+                } else out=out c
+            }
+            bad=1
+            return ""
+        }
+        function value(depth,    c,key,token,start,number) {
+            if (depth > 32) { bad=1; return }
+            ws(); c=substr(s,p,1)
+            if (c == "{") {
+                p++; ws()
+                if (substr(s,p,1)=="}") { p++; return }
+                while (!bad) {
+                    ws(); key=str(); ws()
+                    if (substr(s,p++,1)!=":") { bad=1; return }
+                    ws(); start=p
+                    value(depth+1)
+                    token=substr(s,start,p-start)
+                    sub(/[ \t\r\n]+$/, "", token)
+                    if (depth==0 && key=="status") { count++; success=(token=="1") }
+                    ws(); c=substr(s,p++,1)
+                    if (c=="}") return
+                    if (c!=",") { bad=1; return }
+                }
+            } else if (c == "[") {
+                p++; ws()
+                if (substr(s,p,1)=="]") { p++; return }
+                while (!bad) {
+                    value(depth+1); ws(); c=substr(s,p++,1)
+                    if (c=="]") return
+                    if (c!=",") { bad=1; return }
+                }
+            } else if (c == "\"") str()
+            else if (match(substr(s,p), /^(true|false|null)/)) p+=RLENGTH
+            else if (match(substr(s,p), /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/)) p+=RLENGTH
+            else bad=1
+        }
+        { s=s $0 "\n" }
+        END {
+            p=1; ws()
+            if (substr(s,p,1)!="{") exit 1
+            value(0); ws()
+            exit (bad || p<=length(s) || count!=1 || !success)
+        }
+    '
 }
 
 response_summary() {
@@ -1003,7 +1233,9 @@ backup_existing_config_if_present() {
         return 0
     fi
 
-    local backup_path="${CONFIG_FILE}.bak.$(date '+%Y%m%d_%H%M%S')"
+    local backup_path stamp
+    stamp="$(date '+%Y%m%d_%H%M%S')" || return 1
+    backup_path="${CONFIG_FILE}.bak.${stamp}"
     cp -p "${CONFIG_FILE}" "${backup_path}" || return 1
     log_notice "Existing config backed up to: ${backup_path}"
     return 0
@@ -1045,7 +1277,7 @@ EOF2
         return 1
     fi
 
-    chmod 0644 "${CONFIG_FILE}" || return 1
+    chmod "${CONFIG_FILE_MODE}" "${CONFIG_FILE}" || return 1
     return 0
 }
 
@@ -1160,7 +1392,7 @@ run_setup() {
     printf '%b%s%b\n\n' "${C_BOLD}${C_BLUE}" "host-pushover.sh setup" "${C_RESET}" >&2
     printf 'Preparing to write the global config file to: %s\n' "${CONFIG_FILE}" >&2
     printf 'A timestamped backup will be created first if a config file already exists.\n' >&2
-    printf 'The config directory will be created if needed, and the final file permissions will be set to 0644.\n\n' >&2
+    printf 'Configuration directory mode: %s; file mode: %s.\n\n' "${CONFIG_DIR_MODE}" "${CONFIG_FILE_MODE}" >&2
 
     write_global_config \
         "${SETUP_APP_TOKEN}" \
@@ -1256,134 +1488,645 @@ handle_no_arguments() {
     return 1
 }
 
-parse_args() {
-    while [[ "$#" -gt 0 ]]; do
-        case "$1" in
-            --caller)
-                [[ "$#" -lt 2 ]] && { printf -- '--caller requires a value\n' >&2; return 1; }
-                CALLER="$2"
-                shift 2
-                ;;
-            --level)
-                [[ "$#" -lt 2 ]] && { printf -- '--level requires a value\n' >&2; return 1; }
-                LEVEL="$2"
-                shift 2
-                ;;
-            --message)
-                [[ "$#" -lt 2 ]] && { printf -- '--message requires a value\n' >&2; return 1; }
-                MESSAGE="$2"
-                shift 2
-                ;;
-            --title)
-                [[ "$#" -lt 2 ]] && { printf -- '--title requires a value\n' >&2; return 1; }
-                TITLE="$2"
-                shift 2
-                ;;
-            --validate)
-                DO_VALIDATE=1
-                shift
-                ;;
-            --test)
-                DO_TEST=1
-                shift
-                ;;
-            --force-send)
-                FORCE_SEND=1
-                shift
-                ;;
-            --setup)
-                DO_SETUP=1
-                shift
-                ;;
-            --help|-h)
-                usage
-                exit 0
-                ;;
-            *)
-                printf 'Unknown argument: %s\n' "$1" >&2
-                return 1
-                ;;
-        esac
+# BEGIN UPDATE ENGINE
+# The release builder extracts this block to generate the standalone bootstrap.
+# Keep it independent of Pushover settings and never source downloaded metadata.
+readonly HP_REPOSITORY="RejectH0/host-pushover"
+readonly HP_BOOTSTRAP=0
+
+hp_error() { printf 'host-pushover update: %s\n' "$*" >&2; return 1; }
+
+hp_valid_version() {
+    [[ "$1" =~ ^(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$ ]]
+}
+
+hp_legacy_version() {
+    case "$1" in
+        1.00.0|1.01.0|1.02.0|1.03.0|1.04|1.4|2.00-dsm|2.01-dsm|2.02-dsm|2.03-dsm) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+hp_newer() {
+    # Legacy DSM belongs to a separate lineage, not unified semantic versioning.
+    hp_valid_version "$1" || return 1
+    if hp_legacy_version "$2"; then [[ "${1%%.*}" -ge 2 ]]; return $?; fi
+    hp_valid_version "$2" || return 1
+    local -a available_parts installed_parts
+    local i
+    IFS=. read -r -a available_parts <<< "$1"
+    IFS=. read -r -a installed_parts <<< "$2"
+    for i in 0 1 2; do
+        (( available_parts[i] > installed_parts[i] )) && return 0
+        (( available_parts[i] < installed_parts[i] )) && return 1
     done
+    return 1
+}
 
-    if [[ -n "${CALLER}" ]]; then
-        CALLER="$(sanitize_caller "${CALLER}")" || {
-            printf 'Invalid caller value. Allowed characters: A-Z a-z 0-9 . _ -\n' >&2
-            return 1
-        }
-    fi
+hp_read_version() {
+    local file="$1" line version="" count=0 identity=0
+    [[ -f "${file}" && ! -L "${file}" && "$(stat -c %s "${file}")" -le 1048576 ]] || return 1
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" == 'readonly SCRIPT_NAME="host-pushover.sh"' ]]; then identity=1; fi
+        if [[ "${line}" =~ ^readonly\ SCRIPT_VERSION=\"([^\"]+)\"$ ]]; then
+            version="${BASH_REMATCH[1]}"
+            count=$((count + 1))
+        fi
+    done < "${file}"
+    [[ "${identity}" == 1 && "${count}" == 1 ]] || return 1
+    hp_valid_version "${version}" || hp_legacy_version "${version}" || return 1
+    printf '%s\n' "${version}"
+}
 
-    local mode_count=0
-    mode_count=$(( DO_SETUP + DO_VALIDATE + DO_TEST ))
-    if [[ "${mode_count}" -gt 1 ]]; then
-        printf 'Use only one of --setup, --validate, or --test at a time.\n' >&2
+hp_sha256() {
+    local result
+    result="$(sha256sum "$1")" || return 1
+    result="${result%% *}"
+    [[ "${result}" =~ ^[a-f0-9]{64}$ ]] || return 1
+    printf '%s\n' "${result}"
+}
+
+hp_target_path() {
+    local path="$1" parent name
+    [[ "${path}" != *$'\n'* && "${path}" != *$'\r'* ]] || return 1
+    [[ "${path}" == /* ]] || path="${PWD}/${path}"
+    name="${path##*/}"
+    parent="${path%/*}"
+    parent="$(cd -P -- "${parent:-/}" && pwd -P)" || return 1
+    path="${parent%/}/${name}"
+    # Resolve directory aliases (including DSM home aliases), but reject a final
+    # symlink or multiply linked file instead of silently changing another target.
+    [[ -f "${path}" && ! -L "${path}" && "$(stat -c %h "${path}")" == 1 ]] || return 1
+    printf '%s\n' "${path}"
+}
+
+hp_trusted_directory() {
+    local path="$1" check owner mode
+    [[ "${path}" == /* && "${path}" != *$'\n'* && "${path}" != *$'\r'* ]] || return 1
+    check="${path}"
+    while :; do
+        [[ -d "${check}" && ! -L "${check}" ]] || return 1
+        owner="$(stat -c %u "${check}")" || return 1
+        mode="$(stat -c %a "${check}")" || return 1
+        [[ "${owner}" == 0 && "${mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+        # A root-owned child beneath a sticky directory such as /tmp cannot be
+        # replaced by an ordinary user. Other writable ancestors are unsafe.
+        if (( (8#${mode} & 0022) != 0 && (8#${mode} & 01000) == 0 )); then return 1; fi
+        [[ "${check}" == / ]] && break
+        check="${check%/*}"
+        [[ -n "${check}" ]] || check=/
+    done
+}
+
+hp_make_state() {
+    local path="${HP_STATE_ROOT}" missing=() parent
+    while [[ ! -e "${path}" && ! -L "${path}" ]]; do
+        missing+=("${path}")
+        path="${path%/*}"
+        [[ -n "${path}" ]] || path=/
+    done
+    hp_trusted_directory "${path}" || { hp_error 'State directory has an unsafe owner, mode, or symlink.'; return 1; }
+    local i
+    for ((i=${#missing[@]}-1; i>=0; i--)); do
+        mkdir -m 0755 -- "${missing[i]}" || return 1
+    done
+    for parent in "${HP_STATE}" "${HP_PRIVATE}"; do
+        if [[ ! -e "${parent}" && ! -L "${parent}" ]]; then
+            mkdir -m 0755 -- "${parent}" || return 1
+        fi
+        hp_trusted_directory "${parent}" || { hp_error 'Unsafe update state.'; return 1; }
+    done
+    chmod 0700 "${HP_PRIVATE}" || return 1
+    if ! mkdir -m 0700 -- "${HP_PRIVATE}/lock" 2>/dev/null; then
+        hp_error "Another update/check holds the lock: ${HP_PRIVATE}/lock"
         return 1
     fi
+    HP_LOCKED=1
+    printf '%s\n' "${BASHPID}" > "${HP_PRIVATE}/lock/pid" || return 1
+    HP_WORK="$(mktemp -d "${HP_PRIVATE}/work.XXXXXXXXXX")" || return 1
+}
 
-    if [[ "${DO_SETUP}" -eq 1 ]]; then
-        return 0
+hp_cleanup() {
+    [[ -z "${HP_STAGE:-}" ]] || rm -rf -- "${HP_STAGE}"
+    [[ -z "${HP_WORK:-}" ]] || rm -rf -- "${HP_WORK}"
+    if [[ "${HP_LOCKED:-0}" == 1 ]]; then
+        rm -f -- "${HP_PRIVATE}/lock/pid"
+        rmdir -- "${HP_PRIVATE}/lock"
     fi
-
-    if [[ "${DO_VALIDATE}" -eq 1 || "${DO_TEST}" -eq 1 ]]; then
-        return 0
-    fi
-
-    if [[ -z "${CALLER}" ]]; then
-        printf -- '--caller is required unless --setup, --validate, or --test is used\n' >&2
-        return 1
-    fi
-
-    if [[ -z "${LEVEL}" ]]; then
-        printf -- '--level is required unless --setup, --validate, or --test is used\n' >&2
-        return 1
-    fi
-
-    if [[ -z "${MESSAGE}" ]]; then
-        printf -- '--message is required unless --setup, --validate, or --test is used\n' >&2
-        return 1
-    fi
-
     return 0
 }
 
+hp_parse_manifest() {
+    local file="$1" line key value seen='|' count=0
+    [[ -f "${file}" && ! -L "${file}" && "$(stat -c %s "${file}")" -le 4096 ]] || return 1
+    HP_VERSION="" HP_SHA="" HP_BOOTSTRAP_SHA=""
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        [[ "${line}" == *=* && "${line}" != *$'\r'* ]] || return 1
+        key="${line%%=*}" value="${line#*=}"
+        [[ "${seen}" != *"|${key}|"* ]] || return 1
+        seen+="${key}|"
+        count=$((count + 1))
+        case "${key}" in
+            format) [[ "${value}" == 1 ]] || return 1 ;;
+            version) hp_valid_version "${value}" || return 1; HP_VERSION="${value}" ;;
+            script_sha256) [[ "${value}" =~ ^[a-f0-9]{64}$ ]] || return 1; HP_SHA="${value}" ;;
+            bootstrap_sha256) [[ "${value}" =~ ^[a-f0-9]{64}$ ]] || return 1; HP_BOOTSTRAP_SHA="${value}" ;;
+            *) return 1 ;;
+        esac
+    done < "${file}"
+    [[ "${count}" == 4 && -n "${HP_VERSION}" && "${HP_VERSION%%.*}" -ge 2 && -n "${HP_SHA}" && -n "${HP_BOOTSTRAP_SHA}" ]]
+}
+
+hp_download() {
+    local url="$1" dest="$2" limit="$3" timeout="$4" etag="${5:-}" code rc
+    local -a conditional=()
+    if [[ "${etag}" =~ ^(W/)?\"[[:graph:]]{1,200}\"$ ]]; then
+        conditional=(--header "If-None-Match: ${etag}")
+    fi
+    # ulimit also bounds bodies sent without Content-Length on older curl.
+    code="$(
+        ulimit -f "$(( (limit + 16384 + 1023) / 1024 ))" || exit 1
+        curl --disable --silent --show-error --location --max-redirs 5 \
+            --proto '=https' --proto-redir '=https' --connect-timeout 5 \
+            --max-time "${timeout}" --max-filesize "${limit}" \
+            --dump-header "${HP_WORK}/headers" --output "${dest}" \
+            --write-out '%{http_code}' "${conditional[@]}" "${url}"
+    )"
+    rc=$?
+    [[ "${rc}" == 0 && ( "${code}" == 200 || "${code}" == 304 ) ]] || {
+        hp_error "Download failed (curl=${rc}, HTTP=${code:-unknown})."; return 1;
+    }
+    if [[ "${code}" == 200 ]]; then
+        [[ -f "${dest}" && "$(stat -c %s "${dest}")" -le "${limit}" ]] || return 1
+    fi
+    HP_HTTP="${code}"
+    HP_ETAG=""
+    local line
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        case "${line,,}" in
+            http/*) HP_ETAG="" ;;
+            etag:*) HP_ETAG="${line#*:}"; HP_ETAG="${HP_ETAG# }" ;;
+        esac
+    done < "${HP_WORK}/headers"
+    [[ "${HP_ETAG}" =~ ^(W/)?\"[[:graph:]]{1,200}\"$ ]] || HP_ETAG=""
+}
+
+hp_get_manifest() {
+    local etag="${1:-}" url
+    if [[ -n "${HP_RELEASE_DIR}" ]]; then
+        [[ -f "${HP_RELEASE_DIR}/update-manifest.txt" && "$(stat -c %s "${HP_RELEASE_DIR}/update-manifest.txt")" -le 4096 ]] || return 1
+        cp -- "${HP_RELEASE_DIR}/update-manifest.txt" "${HP_WORK}/manifest" || return 1
+        HP_HTTP=200 HP_ETAG=""
+    else
+        if [[ -n "${HP_RELEASE}" ]]; then
+            url="https://github.com/${HP_REPOSITORY}/releases/download/v${HP_RELEASE}/update-manifest.txt"
+        else
+            url="https://github.com/${HP_REPOSITORY}/releases/latest/download/update-manifest.txt"
+        fi
+        hp_download "${url}" "${HP_WORK}/manifest" 4096 20 "${etag}" || return 1
+        if [[ "${HP_HTTP}" == 304 ]]; then
+            if ! hp_parse_manifest "${HP_STATE}/manifest"; then
+                hp_download "${url}" "${HP_WORK}/manifest" 4096 20 || return 1
+                [[ "${HP_HTTP}" == 200 ]] || return 1
+            else
+                cp -- "${HP_STATE}/manifest" "${HP_WORK}/manifest" || return 1
+                [[ -n "${HP_ETAG}" ]] || HP_ETAG="${etag}"
+            fi
+        fi
+    fi
+    hp_parse_manifest "${HP_WORK}/manifest" || { hp_error 'Invalid release manifest.'; return 1; }
+    [[ -z "${HP_RELEASE}" || "${HP_VERSION}" == "${HP_RELEASE}" ]] || { hp_error 'Pinned release/version mismatch.'; return 1; }
+}
+
+hp_number_file() {
+    local value=""
+    if [[ -f "$1" && ! -L "$1" && "$(stat -c %s "$1")" -le 20 ]]; then
+        IFS= read -r value < "$1" || true
+    fi
+    [[ "${value}" =~ ^[0-9]{1,12}$ ]] || value=0
+    printf '%s\n' "$((10#${value}))"
+}
+
+hp_write_public() {
+    local name="$1" value="$2"
+    printf '%s\n' "${value}" > "${HP_WORK}/public" || return 1
+    chmod 0644 "${HP_WORK}/public" || return 1
+    mv -fT -- "${HP_WORK}/public" "${HP_STATE}/${name}"
+}
+
+hp_status() {
+    local installed last_success=0 next=0 failures=0 now freshness=unknown available=unknown flag=unknown
+    installed="$(hp_read_version "${HP_TARGET_FILE}")" || return 1
+    now="$(date +%s)" || return 1
+    if hp_trusted_directory "${HP_STATE}"; then
+        last_success="$(hp_number_file "${HP_STATE}/last-success")"
+        failures="$(hp_number_file "${HP_STATE}/failures")"
+        next="$(hp_number_file "${HP_STATE}/next-check")"
+        if hp_parse_manifest "${HP_STATE}/manifest"; then
+            available="${HP_VERSION}"
+            freshness=stale
+            if (( last_success > 0 && now >= last_success && now - last_success < 172800 && failures == 0 )); then freshness=fresh; fi
+            flag=false
+            hp_newer "${available}" "${installed}" && flag=true
+        fi
+    fi
+    printf 'installed_version=%s\nlatest_known_version=%s\nupdate_available=%s\ncache=%s\nlast_success=%s\nnext_check=%s\nstate_dir=%s\n' \
+        "${installed}" "${available}" "${flag}" "${freshness}" "${last_success}" "${next}" "${HP_STATE}"
+    if [[ "${flag}" == true ]]; then
+        printf 'Run as root: %q --update --target %q --state-dir %q\n' "${HP_TARGET}" "${HP_TARGET}" "${HP_STATE_ROOT}"
+    fi
+}
+
+hp_sync_flag() (
+    local installed
+    installed="$(hp_read_version "${HP_TARGET_FILE}")" || return 1
+    if hp_parse_manifest "${HP_STATE}/manifest" && hp_newer "${HP_VERSION}" "${installed}"; then
+        hp_write_public update-available "${HP_VERSION}"
+    else
+        rm -f -- "${HP_STATE}/update-available"
+    fi
+)
+
+hp_check() {
+    local now next failures delay etag=""
+    now="$(date +%s)" || return 1
+    next="$(hp_number_file "${HP_STATE}/next-check")"
+    if [[ "${HP_REFRESH}" == 0 ]] && (( next > now && next - now <= 86400 )); then
+        hp_status
+        return $?
+    fi
+    hp_write_public last-attempt "${now}" || return 1
+    if [[ -f "${HP_STATE}/etag" && ! -L "${HP_STATE}/etag" && "$(stat -c %s "${HP_STATE}/etag")" -le 220 ]]; then
+        IFS= read -r etag < "${HP_STATE}/etag" || true
+    fi
+    if ! hp_get_manifest "${etag}"; then
+        failures="$(hp_number_file "${HP_STATE}/failures")"
+        (( failures < 5 )) && failures=$((failures + 1))
+        delay=$((3600 * (1 << failures)))
+        (( delay <= 86400 )) || delay=86400
+        hp_write_public failures "${failures}" || return 1
+        hp_write_public next-check "$((now + delay))" || return 1
+        hp_status
+        return 1
+    fi
+    chmod 0644 "${HP_WORK}/manifest" || return 1
+    mv -fT -- "${HP_WORK}/manifest" "${HP_STATE}/manifest" || return 1
+    hp_write_public etag "${HP_ETAG}" || return 1
+    hp_write_public failures 0 || return 1
+    hp_write_public last-success "${now}" || return 1
+    hp_write_public next-check "$((now + 86400))" || return 1
+    hp_sync_flag || return 1
+    hp_status
+}
+
+hp_get_candidate() {
+    if [[ -n "${HP_RELEASE_DIR}" ]]; then
+        [[ -f "${HP_RELEASE_DIR}/host-pushover.sh" && "$(stat -c %s "${HP_RELEASE_DIR}/host-pushover.sh")" -le 1048576 ]] || return 1
+        cp -- "${HP_RELEASE_DIR}/host-pushover.sh" "${HP_WORK}/candidate" || return 1
+    else
+        hp_download "https://github.com/${HP_REPOSITORY}/releases/download/v${HP_VERSION}/host-pushover.sh" \
+            "${HP_WORK}/candidate" 1048576 60 || return 1
+        [[ "${HP_HTTP}" == 200 ]] || return 1
+    fi
+    [[ "$(hp_sha256 "${HP_WORK}/candidate")" == "${HP_SHA}" ]] || { hp_error 'Script checksum mismatch.'; return 1; }
+    bash -n "${HP_WORK}/candidate" || { hp_error 'Downloaded script has invalid Bash syntax.'; return 1; }
+    [[ "$(hp_read_version "${HP_WORK}/candidate")" == "${HP_VERSION}" ]] || { hp_error 'Downloaded script version mismatch.'; return 1; }
+}
+
+hp_install_file() {
+    local file="$1" uid="$2" gid="$3" mode="$4" expected="$5"
+    local stage_fd stage_identity stage_access
+    # The current directory pins the target parent. Pin the root-owned staging
+    # directory too, so a user renaming directories cannot redirect root writes.
+    HP_STAGE="$(mktemp -d ./.host-pushover-stage.XXXXXXXXXX)" || return 1
+    stage_identity="$(stat -c '%u:%a:%d:%i' "${HP_STAGE}")" || return 1
+    [[ ( "${stage_identity}" == 0:700:* || "${stage_identity}" == 0:2700:* ) && ! -L "${HP_STAGE}" ]] || return 1
+    exec {stage_fd}< "${HP_STAGE}" || return 1
+    stage_access="/proc/self/fd/${stage_fd}"
+    [[ -d "${stage_access}" && "$(stat -Lc '%u:%a:%d:%i' "${stage_access}")" == "${stage_identity}" ]] || return 1
+    cp -- "${file}" "${stage_access}/new" || return 1
+    chown "${uid}:${gid}" "${stage_access}/new" || return 1
+    chmod "${mode}" "${stage_access}/new" || return 1
+    [[ ! -L "${HP_TARGET_FILE}" && "$(stat -c '%d:%i:%u:%g:%a:%h' "${HP_TARGET_FILE}")" == "${HP_TARGET_META}" && "$(hp_sha256 "${HP_TARGET_FILE}")" == "${expected}" && "$(stat -c '%d:%i' "${HP_TARGET%/*}")" == "${HP_PARENT_ID}" ]] || {
+        hp_error 'Target changed during the operation; installation stopped.'; return 1;
+    }
+    # -T is supported by GNU and BusyBox mv. Probe it before touching the target.
+    : > "${HP_WORK}/mv-probe"
+    mv -fT -- "${HP_WORK}/mv-probe" "${HP_WORK}/mv-probe-done" || {
+        hp_error 'This platform needs mv with -T for safe replacement.'; return 1;
+    }
+    mv -fT -- "${stage_access}/new" "${HP_TARGET_FILE}" || return 1
+    exec {stage_fd}<&-
+    rmdir -- "${HP_STAGE}" || return 1
+    HP_STAGE=""
+}
+
+hp_finish_install() {
+    printf '%s\n' "${HP_SHA}" > "${HP_WORK}/receipt" || return 1
+    mv -fT -- "${HP_WORK}/receipt" "${HP_PRIVATE}/installed-sha256" || return 1
+    chmod 0700 "${HP_WORK}/candidate" || return 1
+    mv -fT -- "${HP_WORK}/candidate" "${HP_PRIVATE}/checker.sh" || return 1
+    hp_sync_flag || return 1
+    if [[ "${HP_SCHEDULE}" == 1 ]]; then
+        hp_schedule || { hp_error 'Script installed, but scheduling failed; run --install-check-schedule to retry.'; return 1; }
+    fi
+}
+
+hp_write_cron() {
+    local cron_dir="$1" command="$2" identity minute hour cron_path staged
+    hp_trusted_directory "${cron_dir}" || return 1
+    identity="$(printf '%s:%s' "${HP_TARGET}" "$(hostname)" | sha256sum)" || return 1
+    minute=$((16#${identity:0:4} % 60))
+    hour=$((16#${identity:4:4} % 24))
+    cron_path="${cron_dir}/host-pushover-${HP_ID:0:16}"
+    [[ ! -L "${cron_path}" ]] || return 1
+    # cron treats % specially even within shell quotes.
+    command="${command//%/\\%}"
+    printf 'SHELL=/bin/bash\nPATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin\n%d %d * * * root %s > /dev/null\n' \
+        "${minute}" "${hour}" "${command}" > "${HP_WORK}/cron" || return 1
+    # Stage on cron's filesystem before renaming.
+    staged="$(mktemp "${cron_dir}/.host-pushover.XXXXXXXXXX")" || return 1
+    if ! cp -- "${HP_WORK}/cron" "${staged}" || ! chmod 0644 "${staged}" || ! mv -fT -- "${staged}" "${cron_path}"; then
+        rm -f -- "${staged}"
+        return 1
+    fi
+    printf 'Daily update check installed: %s\n' "${cron_path}"
+}
+
+hp_schedule() {
+    local command
+    # Run a root-owned verified copy for checks, not a user-writable NAS script.
+    [[ -f "${HP_PRIVATE}/checker.sh" && ! -L "${HP_PRIVATE}/checker.sh" ]] || return 1
+    printf -v command '%q %q --check-update --target %q --state-dir %q' \
+        "${BASH}" "${HP_PRIVATE}/checker.sh" "${HP_TARGET}" "${HP_STATE_ROOT}"
+    if [[ -f /etc/synoinfo.conf || -f /etc.defaults/synoinfo.conf ]]; then
+        printf 'Create a daily Task Scheduler task running as root with this command:\n%s\n' "${command}"
+    elif [[ -d /etc/cron.d ]] && { command -v cron >/dev/null 2>&1 || command -v crond >/dev/null 2>&1; }; then
+        hp_write_cron /etc/cron.d "${command}"
+    else
+        printf 'No supported cron installation detected. Schedule this command daily as root:\n%s\n' "${command}"
+    fi
+}
+
+hp_update() {
+    local installed original_hash uid gid mode recorded="" stamp backup
+    installed="$(hp_read_version "${HP_TARGET_FILE}")" || { hp_error 'Unrecognized installed script/version.'; return 1; }
+    original_hash="$(hp_sha256 "${HP_TARGET_FILE}")" || return 1
+    IFS=: read -r uid gid mode < <(stat -c '%u:%g:%a' "${HP_TARGET_FILE}")
+    [[ "${uid}" =~ ^[0-9]+$ && "${gid}" =~ ^[0-9]+$ && "${mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+    (( (8#${mode} & 07000) == 0 )) || { hp_error 'Refusing special permission bits on the script.'; return 1; }
+    if [[ -f "${HP_PRIVATE}/installed-sha256" && ! -L "${HP_PRIVATE}/installed-sha256" ]]; then
+        IFS= read -r recorded < "${HP_PRIVATE}/installed-sha256" || true
+        [[ "${recorded}" =~ ^[a-f0-9]{64}$ ]] || return 1
+        if [[ "${recorded}" != "${original_hash}" && "${HP_ALLOW_MODIFIED}" == 0 ]]; then
+            hp_error 'Installed script was locally modified; inspect it or use --allow-modified.'; return 1
+        fi
+    fi
+    # Installation always re-fetches metadata; it never trusts the discovery cache.
+    hp_get_manifest || return 1
+    if [[ "${installed}" != "${HP_VERSION}" ]] && ! hp_newer "${HP_VERSION}" "${installed}"; then
+        hp_error 'Refusing a downgrade. Use --rollback to restore the recorded backup.'; return 1
+    fi
+    hp_get_candidate || return 1
+    if [[ "${installed}" == "${HP_VERSION}" && "${original_hash}" == "${HP_SHA}" ]]; then
+        printf 'Already installed: %s\n' "${installed}"
+        if [[ "${HP_DRY_RUN}" == 0 ]]; then hp_finish_install || return 1; fi
+        return 0
+    fi
+    if [[ "${installed}" == "${HP_VERSION}" && "${HP_ALLOW_MODIFIED}" == 0 ]]; then
+        hp_error 'Same version has different contents; use --allow-modified after review.'; return 1
+    fi
+    printf 'Target: %s\nVersion: %s -> %s\nOwner: %s:%s; mode: %s\nSHA-256: %s\n' \
+        "${HP_TARGET}" "${installed}" "${HP_VERSION}" "${uid}" "${gid}" "${mode}" "${HP_SHA}"
+    [[ -n "${recorded}" ]] || printf 'Legacy/unmanaged installation: no prior managed checksum; the original file will be backed up.\n'
+    if [[ "${HP_DRY_RUN}" == 1 ]]; then printf 'Dry run: verified; installed file and configuration unchanged.\n'; return 0; fi
+    stamp="$(date -u +%Y%m%dT%H%M%SZ)" || return 1
+    backup="backup-${stamp}-${BASHPID}.sh"
+    cp -- "${HP_TARGET_FILE}" "${HP_PRIVATE}/${backup}" || return 1
+    chmod 0600 "${HP_PRIVATE}/${backup}" || return 1
+    [[ "$(hp_sha256 "${HP_PRIVATE}/${backup}")" == "${original_hash}" ]] || { hp_error 'Target changed before backup completed; installation stopped.'; return 1; }
+    printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' "${backup}" "${original_hash}" "${HP_SHA}" "${uid}" "${gid}" "${mode}" "${installed}" > "${HP_WORK}/rollback" || return 1
+    mv -fT -- "${HP_WORK}/rollback" "${HP_PRIVATE}/rollback" || return 1
+    hp_install_file "${HP_WORK}/candidate" "${uid}" "${gid}" "${mode}" "${original_hash}" || return 1
+    printf 'Installed %s. Backup: %s\n' "${HP_VERSION}" "${HP_PRIVATE}/${backup}"
+    hp_finish_install
+}
+
+hp_rollback() {
+    local -a record
+    local backup old_hash new_hash uid gid mode version current
+    [[ -f "${HP_PRIVATE}/rollback" && ! -L "${HP_PRIVATE}/rollback" ]] || { hp_error 'No managed backup is recorded.'; return 1; }
+    mapfile -t record < "${HP_PRIVATE}/rollback"
+    [[ "${#record[@]}" == 7 ]] || return 1
+    backup="${record[0]}" old_hash="${record[1]}" new_hash="${record[2]}"
+    uid="${record[3]}" gid="${record[4]}" mode="${record[5]}" version="${record[6]}"
+    [[ "${backup}" =~ ^backup-[0-9]{8}T[0-9]{6}Z-[0-9]+\.sh$ && "${old_hash}" =~ ^[a-f0-9]{64}$ && "${new_hash}" =~ ^[a-f0-9]{64}$ ]] || return 1
+    [[ "${uid}" =~ ^[0-9]+$ && "${gid}" =~ ^[0-9]+$ && "${mode}" =~ ^[0-7]{3}$ ]] || return 1
+    [[ ! -L "${HP_PRIVATE}/${backup}" && "$(hp_sha256 "${HP_PRIVATE}/${backup}")" == "${old_hash}" ]] || { hp_error 'Backup checksum mismatch.'; return 1; }
+    [[ "$(hp_read_version "${HP_PRIVATE}/${backup}")" == "${version}" ]] || return 1
+    bash -n "${HP_PRIVATE}/${backup}" || return 1
+    current="$(hp_sha256 "${HP_TARGET_FILE}")" || return 1
+    if [[ "${current}" == "${old_hash}" ]]; then printf 'Backup version is already installed.\n'; return 0; fi
+    [[ "${current}" == "${new_hash}" || "${HP_ALLOW_MODIFIED}" == 1 ]] || { hp_error 'Current file differs from the installed release; inspect or use --allow-modified.'; return 1; }
+    if [[ "${HP_DRY_RUN}" == 1 ]]; then printf 'Dry run: verified rollback to %s.\n' "${version}"; return 0; fi
+    hp_install_file "${HP_PRIVATE}/${backup}" "${uid}" "${gid}" "${mode}" "${current}" || return 1
+    printf '%s\n' "${old_hash}" > "${HP_WORK}/receipt" || return 1
+    mv -fT -- "${HP_WORK}/receipt" "${HP_PRIVATE}/installed-sha256" || return 1
+    hp_sync_flag || return 1
+    printf 'Restored %s; configuration unchanged.\n' "${version}"
+}
+
+hp_main() (
+    umask 077
+    local mode="$1"; shift
+    local HP_TARGET="" HP_STATE_ROOT=/var/lib/host-pushover HP_RELEASE="" HP_RELEASE_DIR=""
+    local HP_REFRESH=0 HP_DRY_RUN=0 HP_ALLOW_MODIFIED=0 HP_SCHEDULE="${HP_BOOTSTRAP}"
+    local HP_STATE HP_PRIVATE HP_ID HP_WORK="" HP_STAGE="" HP_LOCKED=0
+    local HP_TARGET_FILE HP_TARGET_META HP_PARENT_ID
+    local HP_VERSION="" HP_SHA="" HP_BOOTSTRAP_SHA="" HP_HTTP="" HP_ETAG=""
+    local cmd missing=()
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --target|--state-dir|--release|--release-dir)
+                [[ "$#" -ge 2 && -n "$2" ]] || { hp_error "Missing value for $1"; return 2; }
+                case "$1" in
+                    --target) HP_TARGET="$2" ;;
+                    --state-dir) HP_STATE_ROOT="$2" ;;
+                    --release) HP_RELEASE="$2" ;;
+                    --release-dir) HP_RELEASE_DIR="$2" ;;
+                esac
+                shift 2 ;;
+            --refresh) HP_REFRESH=1; shift ;;
+            --dry-run) HP_DRY_RUN=1; shift ;;
+            --allow-modified) HP_ALLOW_MODIFIED=1; shift ;;
+            --no-schedule) HP_SCHEDULE=0; shift ;;
+            --install-check-schedule) HP_SCHEDULE=1; shift ;;
+            *) hp_error "Unknown update option: $1"; return 2 ;;
+        esac
+    done
+    case "${mode}" in check|status|update|rollback|schedule) ;; *) return 2 ;; esac
+    if [[ "${mode}" != status && "${EUID}" != 0 ]]; then hp_error 'This operation requires root.'; return 1; fi
+    [[ -z "${HP_RELEASE}" ]] || hp_valid_version "${HP_RELEASE}" || { hp_error 'Use a stable numeric release such as 2.0.0.'; return 2; }
+    if [[ "${mode}" != update && ( -n "${HP_RELEASE}" || -n "${HP_RELEASE_DIR}" ) ]]; then hp_error 'Release selection is only valid with --update.'; return 2; fi
+    if [[ "${HP_REFRESH}" == 1 && "${mode}" != check ]]; then hp_error '--refresh requires --check-update.'; return 2; fi
+    if [[ "${mode}" != update && "${mode}" != rollback && ( "${HP_DRY_RUN}" == 1 || "${HP_ALLOW_MODIFIED}" == 1 ) ]]; then hp_error '--dry-run/--allow-modified require update or rollback.'; return 2; fi
+    for cmd in stat sha256sum date; do command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}"); done
+    if [[ "${mode}" != status ]]; then
+        for cmd in bash cp mv mkdir rmdir mktemp chmod chown rm; do command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}"); done
+        if [[ ( "${mode}" == update || "${mode}" == check ) && -z "${HP_RELEASE_DIR}" ]]; then
+            command -v curl >/dev/null 2>&1 || missing+=(curl)
+        fi
+    fi
+    [[ "${#missing[@]}" == 0 ]] || { hp_error "Missing commands: ${missing[*]}"; return 1; }
+    if [[ -z "${HP_TARGET}" ]]; then
+        [[ "${HP_BOOTSTRAP}" == 0 ]] || { hp_error 'Bootstrap requires --target pointing to the existing installed script.'; return 2; }
+        HP_TARGET="${SCRIPT_PATH}"
+    fi
+    HP_TARGET="$(hp_target_path "${HP_TARGET}")" || { hp_error 'Target must be an existing regular script, without a final symlink or multiple hard links.'; return 1; }
+    if [[ -n "${HP_RELEASE_DIR}" ]]; then
+        HP_RELEASE_DIR="$(cd -P -- "${HP_RELEASE_DIR}" && pwd -P)" || return 1
+    fi
+    cd -P -- "${HP_TARGET%/*}" || return 1
+    [[ "$(pwd -P)" == "${HP_TARGET%/*}" ]] || { hp_error 'Target parent changed during resolution.'; return 1; }
+    HP_TARGET_FILE="./${HP_TARGET##*/}"
+    HP_PARENT_ID="$(stat -c '%d:%i' .)" || return 1
+    HP_TARGET_META="$(stat -c '%d:%i:%u:%g:%a:%h' "${HP_TARGET_FILE}")" || return 1
+    hp_read_version "${HP_TARGET_FILE}" >/dev/null || { hp_error 'Unrecognized target script/version.'; return 1; }
+    [[ "${HP_STATE_ROOT}" == /* && "${HP_STATE_ROOT}" != / && "${HP_STATE_ROOT}" != *'/../'* && "${HP_STATE_ROOT}" != */.. && "${HP_STATE_ROOT}" != *'/./'* ]] || { hp_error 'State directory must be a canonical absolute path.'; return 2; }
+    HP_STATE_ROOT="${HP_STATE_ROOT%/}"
+    HP_ID="$(printf '%s' "${HP_TARGET}" | sha256sum)" || return 1
+    HP_ID="${HP_ID%% *}"
+    HP_STATE="${HP_STATE_ROOT}/${HP_ID}"
+    HP_PRIVATE="${HP_STATE}/private"
+    if [[ "${mode}" == status ]]; then hp_status; return $?; fi
+    trap hp_cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM HUP
+    hp_make_state || return 1
+    case "${mode}" in
+        check) hp_check ;;
+        update) hp_update ;;
+        rollback) hp_rollback ;;
+        schedule) hp_schedule ;;
+    esac
+)
+# END UPDATE ENGINE
+
+parse_args() {
+    local mode_count=0 profile_set=0
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --caller|--level|--message|--title|--profile)
+                [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; return 2; }
+                case "$1" in
+                    --caller) CALLER="$2" ;;
+                    --level) LEVEL="$2" ;;
+                    --message) MESSAGE="$2" ;;
+                    --title) TITLE="$2" ;;
+                    --profile) PROFILE="$2"; profile_set=1 ;;
+                esac
+                shift 2 ;;
+            --setup|--validate|--test|--version|--check-in|--paths|--help|-h|--check-update|--update-status|--update|--rollback|--install-check-schedule)
+                mode_count=$((mode_count + 1))
+                case "$1" in
+                    --setup) DO_SETUP=1 ;;
+                    --validate) DO_VALIDATE=1 ;;
+                    --test) DO_TEST=1 ;;
+                    --version) DO_VERSION=1 ;;
+                    --check-in) DO_CHECK_IN=1 ;;
+                    --paths) DO_PATHS=1 ;;
+                    --help|-h) DO_HELP=1 ;;
+                    --check-update) UPDATE_MODE=check ;;
+                    --update-status) UPDATE_MODE=status ;;
+                    --update) UPDATE_MODE=update ;;
+                    --rollback) UPDATE_MODE=rollback ;;
+                    --install-check-schedule) UPDATE_MODE=schedule ;;
+                esac
+                shift ;;
+            --target|--state-dir|--release|--release-dir)
+                [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; return 2; }
+                UPDATE_ARGS+=("$1" "$2")
+                shift 2 ;;
+            --refresh|--dry-run|--allow-modified|--no-schedule)
+                UPDATE_ARGS+=("$1")
+                shift ;;
+            --force-send) FORCE_SEND=1; shift ;;
+            *) printf 'Unknown argument: %s\n' "$1" >&2; return 2 ;;
+        esac
+    done
+    if (( mode_count > 1 )); then
+        printf 'Use only one standalone command at a time.\n' >&2
+        return 2
+    fi
+    case "${PROFILE}" in auto|system|dsm) ;; *) printf 'Unknown profile: %s\n' "${PROFILE}" >&2; return 2 ;; esac
+    if [[ -n "${UPDATE_MODE}" ]]; then
+        if [[ -n "${CALLER}${LEVEL}${MESSAGE}${TITLE}" || "${FORCE_SEND}" == 1 || "${profile_set}" == 1 ]]; then
+            printf 'Update commands cannot be combined with notification options.\n' >&2
+            return 2
+        fi
+        return 0
+    fi
+    if (( ${#UPDATE_ARGS[@]} > 0 )); then
+        printf 'Update options require an update command.\n' >&2
+        return 2
+    fi
+    if [[ -n "${CALLER}" ]]; then
+        CALLER="$(sanitize_caller "${CALLER}")" || { printf 'Invalid caller value.\n' >&2; return 2; }
+    fi
+    if (( mode_count == 1 )); then return 0; fi
+    if [[ -z "${CALLER}" || -z "${LEVEL}" || -z "${MESSAGE}" ]]; then
+        printf 'Message delivery requires --caller, --level, and --message.\n' >&2
+        return 2
+    fi
+}
+
+send_health_check_in() {
+    local CALLER="health-check" FORCE_SEND=1 PUSHOVER_ENABLED=true
+    local APP_PUSHOVER_ENABLED=true APP_PUSHOVER_DEBUG=true
+    local host_label TITLE
+    host_label="$(resolve_host_label)"
+    TITLE="[${host_label}] host-pushover health check"
+    validate_effective_config >/dev/null || return 1
+    send_message ok "host-pushover ${SCRIPT_VERSION}; host=${host_label}; time=$(timestamp); configuration validated."
+}
+
 main() {
-    if [[ "$#" -eq 0 ]]; then
+    if [[ "$#" == 0 ]]; then
+        initialize_profile || return 1
         handle_no_arguments
         return $?
     fi
-
-    parse_args "$@" || return 1
-
-    if [[ "${DO_SETUP}" -eq 1 ]]; then
-        run_setup
+    parse_args "$@" || return $?
+    if [[ "${DO_VERSION}" == 1 ]]; then
+        printf '%s %s\n' "${SCRIPT_NAME}" "${SCRIPT_VERSION}"
+        return 0
+    fi
+    if [[ "${DO_HELP}" == 1 ]]; then usage; return 0; fi
+    if [[ -n "${UPDATE_MODE}" ]]; then
+        hp_main "${UPDATE_MODE}" "${UPDATE_ARGS[@]}"
         return $?
     fi
-
+    initialize_profile || return 1
+    if [[ "${DO_PATHS}" == 1 ]]; then
+        printf 'profile=%s\nexecution_uid=%s\nconfig_file=%s\napps_dir=%s\n' \
+            "${PROFILE}" "${EUID}" "${CONFIG_FILE}" "${APPS_DIR}"
+        return 0
+    fi
+    if [[ "${DO_SETUP}" == 1 ]]; then run_setup; return $?; fi
     require_dependencies || return 1
     ensure_global_config_available || return 1
     load_global_config || return 1
-
-    if [[ "${DO_TEST}" -eq 1 && -z "${CALLER}" ]]; then
-        CALLER="manual-test"
-    fi
-
+    if [[ "${DO_CHECK_IN}" == 1 ]]; then send_health_check_in; return $?; fi
+    if [[ "${DO_TEST}" == 1 && -z "${CALLER}" ]]; then CALLER="manual-test"; fi
     load_app_config || return 1
-
-    if [[ "${DO_VALIDATE}" -eq 1 ]]; then
-        validate_effective_config
-        return $?
-    fi
-
-    if [[ "${DO_TEST}" -eq 1 ]]; then
-        if [[ "${AUTO_SETUP_RAN}" -eq 1 && "${SETUP_SENT_TEST}" -eq 1 ]]; then
-            return 0
-        fi
+    if [[ "${DO_VALIDATE}" == 1 ]]; then validate_effective_config; return $?; fi
+    if [[ "${DO_TEST}" == 1 ]]; then
+        if [[ "${AUTO_SETUP_RAN}" == 1 && "${SETUP_SENT_TEST}" == 1 ]]; then return 0; fi
         send_explicit_test_message
         return $?
     fi
-
     send_message "${LEVEL}" "${MESSAGE}"
-    return $?
 }
 
 main "$@"

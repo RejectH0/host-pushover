@@ -1,0 +1,35 @@
+name: Prepare release draft
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+  draft:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build release assets
+        run: python3 scripts/build-release.py
+      - name: Create an unpublished draft with all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version_output="$(bash host-pushover.sh --version)"
+          release_version="${version_output##* }"
+          gh release create "v${release_version}" \
+            --target "${GITHUB_SHA}" --draft --title "v${release_version}" \
+            --notes-file docs/RELEASE-NOTES.md \
+            dist/host-pushover.sh dist/upgrade-host-pushover.sh \
+            dist/update-manifest.txt dist/SHA256SUMS

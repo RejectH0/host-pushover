@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:bookworm", "debian:trixie", "ubuntu:22.04", "ubuntu:24.04"]
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install test tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends bash curl ca-certificates python3 shellcheck busybox git passwd util-linux
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Syntax, lint, and isolated root integration tests
+        run: bash scripts/check.sh
+      - name: Unprivileged runtime and authorization tests
+        run: |
+          useradd --create-home --shell /bin/bash test-runner
+          runuser -u test-runner -- python3 -m unittest discover -s tests -v
