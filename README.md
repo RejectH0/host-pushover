@@ -244,8 +244,9 @@ checks. Actual NAS and Raspberry Pi hardware pilots remain separate.
 
 `python3 scripts/build-release.py` produces the runtime script, a standalone
 bootstrap generated from the same updater functions, `update-manifest.txt`, and
-`SHA256SUMS`. The **Prepare release draft** GitHub Actions workflow runs the test
-matrix and attaches these assets to an unpublished draft. Publish the stable
+`SHA256SUMS`; `--archive` also creates a portable upgrade tarball. The
+**Prepare release draft** GitHub Actions workflow runs the test matrix and
+attaches these assets and the tarball to an unpublished draft. Publish the stable
 release only after the pilot. GitHub documents the
 [latest-release asset endpoint](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
 and [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
@@ -253,6 +254,8 @@ and [immutable releases](https://docs.github.com/en/code-security/concepts/suppl
 **Maintainer tools: [RejectH0's private migration directory](maintainer/legacy-migration/README.md)
 is for personal maintainer use only. DO NOT DEPLOY that directory.** Its generated
 bootstrap and execution wrapper are separate from the installed runtime.
+Reviewed migration bundles can be published as GitHub prereleases for direct
+HTTPS downloads without per-device SSH access or GitHub credentials.
 
 Do not commit real hostnames, usernames, private paths, addresses, credentials,
 SSH keys, or deployment inventories. Use synthetic examples and keep local

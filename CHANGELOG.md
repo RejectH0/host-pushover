@@ -23,6 +23,8 @@
 - A prominently marked directory for RejectH0's personal migration tools, with
   a generated bootstrap, explicit-opt-in execution wrapper, and reproducible
   local upgrade archives that omit local owner metadata.
+- CI-gated migration prereleases with public HTTPS downloads of the archive and
+  execution wrapper, plus upgrade tarballs attached to future stable drafts.
 
 ### Preserved
 

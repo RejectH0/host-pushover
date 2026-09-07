@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Build release assets
-        run: python3 scripts/build-release.py
+        run: python3 scripts/build-release.py --archive
       - name: Create an unpublished draft with all assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -32,4 +32,5 @@ jobs:
             --target "${GITHUB_SHA}" --draft --title "v${release_version}" \
             --notes-file docs/RELEASE-NOTES.md \
             dist/host-pushover.sh dist/upgrade-host-pushover.sh \
-            dist/update-manifest.txt dist/SHA256SUMS
+            dist/update-manifest.txt dist/SHA256SUMS \
+            "dist/host-pushover-${release_version}-upgrade.tar.gz"

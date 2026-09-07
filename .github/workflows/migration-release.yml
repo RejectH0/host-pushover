@@ -1,0 +1,58 @@
+name: Publish migration prerelease
+
+on:
+  push:
+    tags:
+      - "migration-v*-pilot.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migration-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+  publish:
+    needs: test
+    if: github.repository == 'RejectH0/host-pushover'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build and identify the reviewed migration bundle
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_output="$(bash host-pushover.sh --version)"
+          migration_version="${version_output##* }"
+          [[ "${GITHUB_REF_NAME}" =~ ^migration-v[0-9]+\.[0-9]+\.[0-9]+-pilot\.[1-9][0-9]*$ ]]
+          [[ "${GITHUB_REF_NAME}" == "migration-v${migration_version}-pilot."* ]]
+          python3 scripts/build-release.py --archive
+          cmp dist/upgrade-host-pushover.sh maintainer/legacy-migration/upgrade-host-pushover.sh
+          cp maintainer/legacy-migration/run-upgrade.sh dist/run-upgrade.sh
+          migration_archive="host-pushover-${migration_version}-upgrade.tar.gz"
+          (
+            cd dist
+            sha256sum "${migration_archive}" run-upgrade.sh > migration-SHA256SUMS
+          )
+          printf 'version=%s\narchive=%s\n' "${migration_version}" "${migration_archive}" >> "${GITHUB_OUTPUT}"
+      - name: Publish HTTPS downloads for personal maintainer use
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIGRATION_VERSION: ${{ steps.bundle.outputs.version }}
+          MIGRATION_ARCHIVE: ${{ steps.bundle.outputs.archive }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" --verify-tag --prerelease --latest=false \
+            --title "v${MIGRATION_VERSION} migration pilot - RejectH0 private use only" \
+            --notes-file maintainer/legacy-migration/README.md \
+            "dist/${MIGRATION_ARCHIVE}" dist/run-upgrade.sh dist/migration-SHA256SUMS

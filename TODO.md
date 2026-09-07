@@ -30,6 +30,8 @@ and fleet deployment remain separate steps. See [docs/ROLLOUT.md](docs/ROLLOUT.m
 - [x] Keep usage in README, completed changes in CHANGELOG, and plans here.
 - [x] Add clearly marked personal maintainer migration tools, require wrapper
   opt-in, and check the generated bootstrap against the shared source in CI.
+- [x] Provide migration prerelease publication for direct HTTPS downloads,
+  avoiding per-device SSH setup while retaining the separate stable channel.
 
 ## Release validation and rollout
 

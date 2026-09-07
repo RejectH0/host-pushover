@@ -14,8 +14,15 @@ bash scripts/check.sh
 sudo python3 -m unittest discover -s tests -v
 ```
 
-Copy the four files in `dist/` into a temporary directory on a pilot device using
-your existing administrative transfer method. The bundle contains:
+For devices with HTTPS access, use the reviewed migration prerelease's archive
+and execution wrapper from GitHub. No SSH credentials or GitHub credentials are
+needed to download public release assets. See the
+[maintainer instructions](../maintainer/legacy-migration/README.md) and retain
+the trusted build checksums for both files. Migration prereleases are separate
+from the latest stable release used by automatic discovery.
+
+Alternatively, copy the four files in `dist/` into a temporary directory on a
+pilot device using your existing administrative transfer method. The bundle contains:
 
 - `host-pushover.sh`
 - `upgrade-host-pushover.sh`

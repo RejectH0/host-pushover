@@ -55,11 +55,25 @@ timestamps. It never packages local accounts, SSH keys, inventories, or other
 files from `dist/`. Review the generated Git diff before publishing changes.
 CI rejects a tracked bootstrap that differs from the shared engine's output.
 
-Transfer the reviewed archive and `run-upgrade.sh` through the maintainer's
-existing administrative channel. Keep the archive checksum from the reviewed
-build separately; computing a checksum from an untrusted download does not
-establish its authenticity. Archives stay in ignored `dist/` locally and are not
-committed to this directory.
+The **Publish migration prerelease** workflow publishes the reviewed archive,
+`run-upgrade.sh`, and `migration-SHA256SUMS` as public GitHub release assets when
+the maintainer pushes a tag named `migration-v<VERSION>-pilot.<NUMBER>`. The tag
+version must match the runtime version, and the full CI matrix must pass first.
+Each new bundle gets a new tag; existing release assets are never overwritten.
+The release is explicitly a prerelease and is not marked as the latest stable
+release. Stable version discovery continues to use the stable release endpoint.
+
+Use the matching release asset links from the
+[GitHub releases page](https://github.com/RejectH0/host-pushover/releases) to
+download directly on each device with HTTPS. Public downloads require no SSH
+access, GitHub account, or GitHub token on the device. Manual transfer remains
+available for devices without HTTPS access.
+
+Keep the archive and runner checksums from the reviewed build separately;
+computing a checksum from an untrusted download does not establish its
+authenticity. Verify the runner before executing it. Archives stay in ignored
+`dist/` locally; published copies are release assets, not tracked repository
+files. The private-use warning applies to the release assets too.
 
 ## Maintainer execution — RejectH0 only
 
