@@ -9,7 +9,7 @@ import tarfile
 import unittest
 from pathlib import Path
 
-from test_host_pushover import Fixture, ROOT
+from test_host_pushover import Fixture, ROOT, VERSION
 
 
 RUNNER = ROOT / "maintainer/legacy-migration/run-upgrade.sh"
@@ -29,7 +29,7 @@ class RunnerFixture(Fixture):
         files = {"host-pushover.sh": self.script.read_bytes(),
                  "upgrade-host-pushover.sh": BOOTSTRAP.read_bytes()}
         files["update-manifest.txt"] = (
-            "format=1\nversion=2.0.0\nscript_sha256="
+            f"format=1\nversion={VERSION}\nscript_sha256="
             + hashlib.sha256(files["host-pushover.sh"]).hexdigest()
             + "\nbootstrap_sha256="
             + hashlib.sha256(files["upgrade-host-pushover.sh"]).hexdigest() + "\n").encode()

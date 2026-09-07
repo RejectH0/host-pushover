@@ -5,7 +5,7 @@ Synology DSM. **One `host-pushover.sh` serves every platform.** The legacy DSM
 variant has been absorbed into the unified script.
 
 The current stable release is
-[**2.0.0**](https://github.com/RejectH0/host-pushover/releases/tag/v2.0.0).
+[**2.1.0**](https://github.com/RejectH0/host-pushover/releases/tag/v2.1.0).
 Its standalone manifest is available through the update discovery URL below.
 See [docs/ROLLOUT.md](docs/ROLLOUT.md) for migration and deployment validation.
 
@@ -45,6 +45,21 @@ bash host-pushover.sh --paths
 `--version` also works when `HOME` is absent. `--paths` reports the profile,
 execution UID, and resolved configuration paths. Run it in the scheduler's
 execution context when diagnosing a DSM task.
+
+Use `--doctor` for a local PASS/WARN/FAIL report covering Bash/curl capabilities,
+required utilities, execution UID and resolved profile/home, configuration
+accessibility and permissions, directory-descriptor support, and cached update
+health. It never loads configuration code, validates API credentials, contacts
+the network, changes files, or sends notifications. Warnings return success;
+failed prerequisites return a nonzero exit status.
+
+```bash
+bash host-pushover.sh --doctor
+```
+
+Run DSM diagnostics as the normal notification account. Root's configuration
+context differs from that account's context. `--state-dir` and `--target` may be
+supplied to inspect a custom updater state directory or installed target.
 
 ## Installation and existing installations
 
@@ -165,6 +180,7 @@ Update discovery and installation are separate commands:
 ```bash
 sudo host-pushover.sh --check-update
 host-pushover.sh --update-status
+host-pushover.sh --update-status --human
 sudo host-pushover.sh --check-update --refresh
 sudo host-pushover.sh --update --dry-run
 sudo host-pushover.sh --update
@@ -188,6 +204,49 @@ an `update-available` flag containing the newer version. The flag is separate
 from Pushover configuration. `--update-status` compares the installed version
 with the cached version and reports whether the cache is fresh, stale, or
 unknown. A failed check preserves the last known version and marks it stale.
+
+`--update-status --human` shows UTC dates for the last attempt, last successful
+check, and next eligible check. It also describes the last recorded failure
+(for example HTTP 404, a timeout, or an invalid manifest) and any update-notice
+result. Historical failures remain visible after recovery. Error records contain
+controlled codes rather than HTTP bodies, curl stderr, or credentials. The
+existing machine-readable output remains unchanged. Both formats are offline.
+
+### Update-available notifications
+
+Starting with 2.1.0, a successful scheduled check automatically sends a Pushover
+notice when a newer stable version exists. It includes the runtime-discovered
+host label, installed/available versions, and the root update command. Existing
+global settings and optional `apps/host-pushover-update.conf` overrides supply
+credentials, recipient, device, sound, and enable flags; no configuration
+migration or new required settings are needed.
+
+Notices default to quiet priority `-1`. For normal priority, add
+`--notify-priority 0` to the scheduled check command. `--no-notify` suppresses
+notices for one check invocation. These options do not change ordinary message
+delivery or install updates.
+
+The root-owned checker opens its verified source and starts a separate delivery
+process with a clean environment. System-profile delivery uses root's system
+configuration. DSM delivery switches to the installed script owner's UID with
+`runuser` or `sudo`, resolves its home from the account database, and only then
+loads that user's configuration. It never executes the user-writable installed
+script automatically as root. A missing verified checker or account-switch tool
+is reported in human status while discovery continues.
+
+Each notice makes one transport attempt. A successful API response records a
+private per-version marker so later checks avoid repeated notices. Failed or
+disabled notices are eligible again after an hour, on a subsequent check; there
+is no background retry process. Fresh cached discovery can be used for delivery
+without another GitHub request. A timeout after Pushover accepts a message can
+still cause a duplicate on retry. Notice failures do not clear the available
+version or turn a successful discovery into a failed GitHub check.
+
+Existing 2.0.0 installations detect 2.1.0 with their original status/flag logic.
+Automatic Pushover update notices start with releases discovered after upgrading
+to 2.1.0. Existing daily tasks use the replaced checker without rescheduling.
+
+### Installing an available update
 
 Root must explicitly invoke `--update` to install. It obtains fresh metadata,
 downloads the version-specific release asset, validates its checksum, Bash

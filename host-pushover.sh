@@ -10,7 +10,7 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) ))
 fi
 
 readonly SCRIPT_NAME="host-pushover.sh"
-readonly SCRIPT_VERSION="2.0.0"
+readonly SCRIPT_VERSION="2.1.0"
 
 readonly SCRIPT_PATH="${BASH_SOURCE[0]}"
 PROFILE="auto"
@@ -22,6 +22,7 @@ CONFIG_FILE_MODE="0644"
 DO_VERSION=0
 DO_CHECK_IN=0
 DO_PATHS=0
+DO_DOCTOR=0
 DO_HELP=0
 UPDATE_MODE=""
 UPDATE_ARGS=()
@@ -175,8 +176,9 @@ Usage:
   ${SCRIPT_NAME} --validate
   ${SCRIPT_NAME} --test [--caller <name>] [--title <text>] [--message <text>]
   ${SCRIPT_NAME} --version | --paths | --check-in
-  ${SCRIPT_NAME} --check-update [--refresh] [--target <path>]
-  ${SCRIPT_NAME} --update-status [--target <path>]
+  ${SCRIPT_NAME} --doctor [--profile auto|system|dsm] [--state-dir <path>]
+  ${SCRIPT_NAME} --check-update [--refresh] [--no-notify] [--notify-priority -1|0] [--target <path>]
+  ${SCRIPT_NAME} --update-status [--human] [--target <path>]
   ${SCRIPT_NAME} --update [--dry-run] [--target <path>]
   ${SCRIPT_NAME} --rollback [--dry-run] [--target <path>]
   ${SCRIPT_NAME} --caller <name> --level <level> --message <text>
@@ -193,9 +195,13 @@ Options:
   --check-in    Validate configuration and send a versioned health notice
   --version     Print the version without configuration or network access
   --paths       Print the detected profile, execution UID, and configuration paths
+  --doctor      Inspect local prerequisites, permissions, and cached updater health
   --profile     auto (default), system, or dsm; normally detected automatically
   --check-update  Root: check GitHub, using the daily cache unless --refresh
   --update-status  Read cached update status without network access
+  --human       Show readable update status and dates (with --update-status)
+  --no-notify    Suppress update notices for this --check-update invocation
+  --notify-priority  Update notice priority: -1 quiet (default), or 0 normal
   --update      Root: verify, back up, and install a newer release
   --rollback    Root: restore the previous managed backup
   --install-check-schedule  Root: install a daily check or print DSM task instructions
@@ -1488,6 +1494,144 @@ handle_no_arguments() {
     return 1
 }
 
+notification_account() {
+    local wanted="$1" entry="" account _secret uid gid _gecos account_home _shell
+    if command -v getent >/dev/null 2>&1; then entry="$(getent passwd "${wanted}" 2>/dev/null || true)"; fi
+    if [[ -z "${entry}" ]]; then
+        while IFS=: read -r account _secret uid gid _gecos account_home _shell; do
+            if [[ "${uid}" == "${wanted}" ]]; then
+                printf '%s:%s:%s:%s\n' "${account}" "${uid}" "${gid}" "${account_home}"
+                return 0
+            fi
+        done < /etc/passwd
+        return 1
+    fi
+    IFS=: read -r account _secret uid gid _gecos account_home _shell <<< "${entry}"
+    [[ "${uid}" == "${wanted}" && "${gid}" =~ ^[0-9]+$ && "${account_home}" == /* ]] || return 1
+    printf '%s:%s:%s:%s\n' "${account}" "${uid}" "${gid}" "${account_home}"
+}
+
+dispatch_update_notice() {
+    local profile uid=0 account account_uid _account_gid account_home entry
+    local -a notice_command
+    profile="$(detect_profile /etc)" || return 4
+    if [[ "${profile}" == dsm ]]; then uid="$(stat -c %u "${HP_TARGET_FILE}")" || return 4; fi
+    entry="$(notification_account "${uid}")" || return 4
+    IFS=: read -r account account_uid _account_gid account_home <<< "${entry}"
+    [[ "${account_uid}" == "${uid}" && "${account_home}" == /* && -d "${account_home}" ]] || return 4
+    [[ "$(stat -Lc %u "${account_home}")" == "${uid}" ]] || return 4
+    # The parent opens the verified root-owned source; the child creates its own
+    # source pipe after changing UID. No user-writable installed code runs as root.
+    notice_command=(env -i "PATH=${PATH}" "HOME=${account_home}" "USER=${account}" "LOGNAME=${account}" LC_ALL=C
+        "${BASH}" --noprofile --norc -c 'source <(cat) "$@"' host-pushover-notice
+        --internal-update-notice "${uid}" "${profile}" "$1" "$2" "${HP_TARGET}" "${HP_STATE_ROOT}" "${HP_NOTICE_PRIORITY}")
+    if [[ "${uid}" != 0 ]]; then
+        if command -v runuser >/dev/null 2>&1; then
+            notice_command=(runuser -u "${account}" -- "${notice_command[@]}")
+        elif command -v sudo >/dev/null 2>&1; then
+            notice_command=(sudo -n -u "#${uid}" -- "${notice_command[@]}")
+        else return 4; fi
+    fi
+    "${notice_command[@]}" < "${HP_PRIVATE}/checker.sh"
+}
+
+send_update_notice() {
+    # Internal delivery entrypoint. It cannot check GitHub or install anything.
+    [[ "$#" == 7 ]] || return 2
+    local expected_uid="$1" installed="$3" available="$4" target="$5" state_root="$6" priority="$7"
+    [[ "${expected_uid}" == "${EUID}" && ( "$2" == system || "$2" == dsm ) ]] || return 2
+    hp_newer "${available}" "${installed}" || return 2
+    [[ "${priority}" == -1 || "${priority}" == 0 ]] || return 2
+    local PROFILE="$2"
+    initialize_profile || return 1
+    require_dependencies || return 1
+    load_global_config || return 1
+    CALLER=host-pushover-update
+    load_app_config || return 1
+    effective_enabled || return 3
+    is_fully_configured || return 1
+    local host_label command_hint
+    host_label="$(resolve_host_label)"
+    printf -v command_hint '/bin/bash %q --update --target %q --state-dir %q' "${target}" "${target}" "${state_root}"
+    TITLE="[${host_label}] host-pushover update available"
+    FORCE_SEND=1
+    APP_PUSHOVER_DEBUG_PRIORITY="${priority}"
+    PUSHOVER_RETRY_ATTEMPTS=1
+    send_message notice "host=${host_label}; installed=${installed}; available=${available}. Run as root: ${command_hint}"
+}
+
+doctor_result() {
+    printf '%s %s\n' "$1" "$2"
+    case "$1" in FAIL) doctor_failures=$((doctor_failures + 1)) ;; WARN) doctor_warnings=$((doctor_warnings + 1)) ;; esac
+}
+
+doctor_permissions() {
+    local path="$1" expected_mode="$2" expected_uid="$3" description="$4" metadata uid mode
+    if [[ ! -e "${path}" ]]; then doctor_result FAIL "${description}: missing"; return 0; fi
+    if [[ -L "${path}" ]]; then doctor_result WARN "${description}: symbolic link; inspect its destination"; return 0; fi
+    if ! metadata="$(stat -c '%u:%a' "${path}" 2>/dev/null)"; then doctor_result FAIL "${description}: metadata inaccessible"; return 0; fi
+    IFS=: read -r uid mode <<< "${metadata}"
+    if [[ "${uid}" != "${expected_uid}" ]] || (( (8#${mode} & ~8#${expected_mode}) != 0 )); then
+        doctor_result WARN "${description}: owner UID ${uid}, mode ${mode}; expected UID ${expected_uid} with permissions no broader than ${expected_mode}"
+    else doctor_result PASS "${description}: owner UID ${uid}, mode ${mode}"; fi
+}
+
+run_doctor() {
+    local doctor_failures=0 doctor_warnings=0 cmd expected_uid=0 curl_info curl_version status line cache=unknown
+    local target="${SCRIPT_PATH}" state_root=/var/lib/host-pushover
+    local -a missing=()
+    while (( $# )); do
+        case "$1" in
+            --target) target="$2"; shift 2 ;;
+            --state-dir) state_root="$2"; shift 2 ;;
+            *) printf 'Doctor accepts only --profile, --target, and --state-dir.\n' >&2; return 2 ;;
+        esac
+    done
+    printf 'host-pushover %s local diagnostics\n' "${SCRIPT_VERSION}"
+    doctor_result PASS "Bash ${BASH_VERSION} (minimum 4.4)"
+    if ! initialize_profile; then doctor_result FAIL 'Profile/home resolution failed'; return 1; fi
+    doctor_result PASS "Execution UID ${EUID}; profile ${PROFILE}"
+    printf 'Configuration path: %s\n' "${CONFIG_FILE}"
+    if [[ "${PROFILE}" == dsm ]]; then
+        expected_uid="${EUID}"
+        printf 'Resolved notification home: %s\n' "${CONFIG_ROOT_DIR%/.config/host-pushover}"
+    fi
+    for cmd in curl sed tr mktemp grep hostname date cp mkdir chmod rm cat sleep awk stat sha256sum chown rmdir mv; do
+        command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}")
+    done
+    if (( ${#missing[@]} )); then doctor_result FAIL "Missing utilities: ${missing[*]}"
+    else doctor_result PASS 'Required notification and update utilities are available'; fi
+    if command -v curl >/dev/null 2>&1; then
+        curl_info="$(curl --disable --version 2>/dev/null)"
+        if [[ "${curl_info}" =~ ^curl[[:space:]]([0-9.]+) ]]; then curl_version="${BASH_REMATCH[1]}"; else curl_version=unknown; fi
+        if [[ "${curl_info}" =~ (^|[[:space:]])https([[:space:]]|$) ]]; then doctor_result PASS "curl ${curl_version} supports HTTPS"
+        else doctor_result FAIL 'curl does not report HTTPS support'; fi
+    fi
+    if [[ -f "${CONFIG_FILE}" && -r "${CONFIG_FILE}" ]]; then doctor_result PASS 'Global configuration is readable (contents were not loaded)'
+    else doctor_result FAIL 'Global configuration is missing or unreadable'; fi
+    if command -v stat >/dev/null 2>&1; then
+        doctor_permissions "${CONFIG_ROOT_DIR}" "${CONFIG_DIR_MODE}" "${expected_uid}" 'Configuration directory'
+        doctor_permissions "${CONFIG_FILE}" "${CONFIG_FILE_MODE}" "${expected_uid}" 'Configuration file'
+        doctor_permissions "${APPS_DIR}" "${CONFIG_DIR_MODE}" "${expected_uid}" 'Caller configuration directory'
+        if [[ "${PROFILE}" == dsm && -f "${target}" && "$(stat -c %u "${target}")" != "${EUID}" ]]; then
+            doctor_result WARN 'The installation belongs to another UID; run diagnostics as its notification account'
+        fi
+    fi
+    if [[ -d /proc/self/fd ]]; then doctor_result PASS 'Directory descriptor support is available'
+    else doctor_result FAIL '/proc/self/fd is unavailable for atomic updates'; fi
+    if [[ "${PROFILE}" == dsm ]]; then
+        if command -v runuser >/dev/null 2>&1 || command -v sudo >/dev/null 2>&1; then doctor_result PASS 'An account-switch utility is available for scheduled notices'
+        else doctor_result WARN 'Scheduled update notices need runuser or sudo to use the notification account'; fi
+    fi
+    if status="$(hp_main status --target "${target}" --state-dir "${state_root}" 2>/dev/null)"; then
+        while IFS= read -r line; do case "${line}" in cache=*) cache="${line#*=}" ;; esac; done <<< "${status}"
+        if [[ "${cache}" == fresh ]]; then doctor_result PASS 'Cached update information is fresh'
+        else doctor_result WARN "Cached update information is ${cache}; use --check-update --refresh as root for an online check"; fi
+    else doctor_result FAIL 'Installed target or updater state could not be inspected'; fi
+    printf 'Result: %s failure(s), %s warning(s). No configuration code was loaded; no network requests or notifications were made.\n' "${doctor_failures}" "${doctor_warnings}"
+    (( doctor_failures == 0 ))
+}
+
 # BEGIN UPDATE ENGINE
 # The release builder extracts this block to generate the standalone bootstrap.
 # Keep it independent of Pushover settings and never source downloaded metadata.
@@ -1654,10 +1798,13 @@ hp_download() {
     )"
     rc=$?
     [[ "${rc}" == 0 && ( "${code}" == 200 || "${code}" == 304 ) ]] || {
+        if [[ "${rc}" != 0 ]]; then HP_FAILURE="curl:${rc}"
+        elif [[ "${code}" =~ ^[0-9]{3}$ ]]; then HP_FAILURE="http:${code}"
+        else HP_FAILURE=download; fi
         hp_error "Download failed (curl=${rc}, HTTP=${code:-unknown})."; return 1;
     }
     if [[ "${code}" == 200 ]]; then
-        [[ -f "${dest}" && "$(stat -c %s "${dest}")" -le "${limit}" ]] || return 1
+        [[ -f "${dest}" && "$(stat -c %s "${dest}")" -le "${limit}" ]] || { HP_FAILURE=size; return 1; }
     fi
     HP_HTTP="${code}"
     HP_ETAG=""
@@ -1695,7 +1842,7 @@ hp_get_manifest() {
             fi
         fi
     fi
-    hp_parse_manifest "${HP_WORK}/manifest" || { hp_error 'Invalid release manifest.'; return 1; }
+    hp_parse_manifest "${HP_WORK}/manifest" || { HP_FAILURE=manifest; hp_error 'Invalid release manifest.'; return 1; }
     [[ -z "${HP_RELEASE}" || "${HP_VERSION}" == "${HP_RELEASE}" ]] || { hp_error 'Pinned release/version mismatch.'; return 1; }
 }
 
@@ -1721,6 +1868,35 @@ hp_write_public() {
     hp_publish_file "${HP_WORK}/public" "${HP_STATE}/${name}"
 }
 
+hp_read_small() {
+    local value=""
+    if [[ -f "$1" && ! -L "$1" && "$(stat -c %s "$1")" -le 80 ]]; then
+        IFS= read -r value < "$1" || true
+    fi
+    printf '%s' "${value}"
+}
+
+hp_readable_time() {
+    if [[ "$1" == 0 ]]; then printf 'not recorded'; return 0; fi
+    date -u -d "@$1" '+%Y-%m-%d %H:%M:%S UTC' 2>/dev/null || printf 'Unix time %s\n' "$1"
+}
+
+hp_failure_description() {
+    # Persist only controlled error codes, never response bodies or curl stderr.
+    case "$1" in
+        http:404) printf 'HTTP 404: release manifest not found' ;;
+        http:*) [[ "$1" =~ ^http:[0-9]{3}$ ]] && printf 'HTTP %s' "${1#*:}" || printf 'unknown failure' ;;
+        curl:28) printf 'Request timed out (curl 28)' ;;
+        curl:6) printf 'Hostname lookup failed (curl 6)' ;;
+        curl:7) printf 'Connection failed (curl 7)' ;;
+        curl:60) printf 'TLS certificate verification failed (curl 60)' ;;
+        curl:*) [[ "$1" =~ ^curl:[0-9]{1,3}$ ]] && printf 'Transport failure (curl %s)' "${1#*:}" || printf 'unknown failure' ;;
+        manifest) printf 'Release manifest is invalid' ;;
+        size) printf 'Release manifest exceeds the size limit' ;;
+        *) printf 'Release metadata could not be downloaded or read' ;;
+    esac
+}
+
 hp_status() {
     local installed last_success=0 next=0 failures=0 now freshness=unknown available=unknown flag=unknown
     installed="$(hp_read_version "${HP_TARGET_FILE}")" || return 1
@@ -1737,8 +1913,36 @@ hp_status() {
             hp_newer "${available}" "${installed}" && flag=true
         fi
     fi
-    printf 'installed_version=%s\nlatest_known_version=%s\nupdate_available=%s\ncache=%s\nlast_success=%s\nnext_check=%s\nstate_dir=%s\n' \
+    if [[ "${HP_HUMAN:-0}" == 1 ]]; then
+        local last_attempt=0 last_failure=0 error="" notice="" decision
+        if hp_trusted_directory "${HP_STATE}"; then
+            last_attempt="$(hp_number_file "${HP_STATE}/last-attempt")"
+            last_failure="$(hp_number_file "${HP_STATE}/last-failure")"
+            error="$(hp_read_small "${HP_STATE}/last-error")"
+            notice="$(hp_read_small "${HP_STATE}/notice-status")"
+        fi
+        case "${flag}" in
+            true) decision='Update available' ;;
+            false) decision='No newer version in the cached manifest' ;;
+            *) decision='Available version is unknown' ;;
+        esac
+        printf 'Installed version: %s\nLatest known version: %s\nStatus: %s\nCache: %s\n' "${installed}" "${available}" "${decision}" "${freshness}"
+        printf 'Last attempt: %s\nLast successful check: %s\nNext eligible check: %s\n' \
+            "$(hp_readable_time "${last_attempt}")" "$(hp_readable_time "${last_success}")" "$(hp_readable_time "${next}")"
+        if (( last_failure > 0 )); then
+            printf 'Last recorded failure: %s; %s\n' "$(hp_readable_time "${last_failure}")" "$(hp_failure_description "${error}")"
+        else printf 'Last recorded failure: none\n'; fi
+        case "${notice}" in
+            sent) printf 'Update notice: accepted by Pushover\n' ;;
+            failed) printf 'Update notice: delivery failed; eligible for retry later\n' ;;
+            unavailable) printf 'Update notice: verified notifier or account switch is unavailable\n' ;;
+            disabled) printf 'Update notice: disabled by existing notification configuration\n' ;;
+        esac
+        printf 'State directory: %s\n' "${HP_STATE}"
+    else
+        printf 'installed_version=%s\nlatest_known_version=%s\nupdate_available=%s\ncache=%s\nlast_success=%s\nnext_check=%s\nstate_dir=%s\n' \
         "${installed}" "${available}" "${flag}" "${freshness}" "${last_success}" "${next}" "${HP_STATE}"
+    fi
     if [[ "${flag}" == true ]]; then
         printf 'Run as root: %q --update --target %q --state-dir %q\n' "${HP_TARGET}" "${HP_TARGET}" "${HP_STATE_ROOT}"
     fi
@@ -1754,11 +1958,54 @@ hp_sync_flag() (
     fi
 )
 
+hp_maybe_notify() {
+    # Discovery owns deduplication state; delivery runs in a separate account.
+    [[ "${HP_BOOTSTRAP}" == 0 && "${HP_NOTIFY}" == 1 ]] || return 0
+    declare -F dispatch_update_notice >/dev/null || return 0
+    local now last_success installed version marker next receipt rc=0
+    now="$(date +%s)" || return 0
+    last_success="$(hp_number_file "${HP_STATE}/last-success")"
+    (( last_success > 0 && now >= last_success && now - last_success < 172800 )) || return 0
+    [[ "$(hp_number_file "${HP_STATE}/failures")" == 0 ]] || return 0
+    hp_parse_manifest "${HP_STATE}/manifest" || return 0
+    version="${HP_VERSION}"
+    installed="$(hp_read_version "${HP_TARGET_FILE}")" || return 0
+    hp_newer "${version}" "${installed}" || return 0
+    marker="${HP_PRIVATE}/notified-${version}"
+    [[ ! -e "${marker}" && ! -L "${marker}" ]] || return 0
+    next="$(hp_number_file "${HP_STATE}/notice-next")"
+    (( next <= now || next - now > 86400 )) || return 0
+    receipt="$(hp_read_small "${HP_PRIVATE}/installed-sha256")"
+    if [[ ! "${receipt}" =~ ^[a-f0-9]{64}$ || ! -f "${HP_PRIVATE}/checker.sh" || -L "${HP_PRIVATE}/checker.sh" ]] \
+        || [[ "$(stat -c '%u:%a' "${HP_PRIVATE}/checker.sh")" != 0:700 ]] \
+        || [[ "$(hp_sha256 "${HP_PRIVATE}/checker.sh")" != "${receipt}" ]]; then
+        rc=4
+    else
+        dispatch_update_notice "${installed}" "${version}" > "${HP_WORK}/notice-output" 2>&1 || rc=$?
+    fi
+    if [[ "${rc}" == 0 ]]; then
+        printf '%s\n' "${now}" > "${HP_WORK}/notified" || return 0
+        hp_publish_file "${HP_WORK}/notified" "${marker}" || return 0
+        hp_write_public notice-status sent || return 0
+        hp_write_public notice-next 0 || return 0
+    else
+        case "${rc}" in
+            3) hp_write_public notice-status disabled || return 0 ;;
+            4) hp_write_public notice-status unavailable || return 0 ;;
+            *) hp_write_public notice-status failed || return 0 ;;
+        esac
+        hp_write_public notice-next "$((now + 3600))" || return 0
+        [[ "${rc}" == 3 ]] || printf 'host-pushover update: update detected; notice was not delivered. See --update-status --human.\n' >&2
+    fi
+    return 0
+}
+
 hp_check() {
     local now next failures delay etag=""
     now="$(date +%s)" || return 1
     next="$(hp_number_file "${HP_STATE}/next-check")"
     if [[ "${HP_REFRESH}" == 0 ]] && (( next > now && next - now <= 86400 )); then
+        hp_maybe_notify
         hp_status
         return $?
     fi
@@ -1773,6 +2020,8 @@ hp_check() {
         (( delay <= 86400 )) || delay=86400
         hp_write_public failures "${failures}" || return 1
         hp_write_public next-check "$((now + delay))" || return 1
+        hp_write_public last-failure "${now}" || return 1
+        hp_write_public last-error "${HP_FAILURE}" || return 1
         hp_status
         return 1
     fi
@@ -1783,6 +2032,7 @@ hp_check() {
     hp_write_public last-success "${now}" || return 1
     hp_write_public next-check "$((now + 86400))" || return 1
     hp_sync_flag || return 1
+    hp_maybe_notify
     hp_status
 }
 
@@ -1946,22 +2196,26 @@ hp_main() (
     local mode="$1"; shift
     local HP_TARGET="" HP_STATE_ROOT=/var/lib/host-pushover HP_RELEASE="" HP_RELEASE_DIR=""
     local HP_REFRESH=0 HP_DRY_RUN=0 HP_ALLOW_MODIFIED=0 HP_SCHEDULE="${HP_BOOTSTRAP}"
+    local HP_HUMAN=0 HP_NOTIFY=1 HP_NOTICE_PRIORITY=-1 HP_NOTICE_OPTION=0 HP_FAILURE=download
     local HP_STATE HP_PRIVATE HP_ID HP_WORK="" HP_STAGE="" HP_LOCKED=0
     local HP_TARGET_FILE HP_TARGET_META HP_PARENT_ID
     local HP_VERSION="" HP_SHA="" HP_BOOTSTRAP_SHA="" HP_HTTP="" HP_ETAG=""
     local cmd missing=()
     while [[ "$#" -gt 0 ]]; do
         case "$1" in
-            --target|--state-dir|--release|--release-dir)
+            --target|--state-dir|--release|--release-dir|--notify-priority)
                 [[ "$#" -ge 2 && -n "$2" ]] || { hp_error "Missing value for $1"; return 2; }
                 case "$1" in
                     --target) HP_TARGET="$2" ;;
                     --state-dir) HP_STATE_ROOT="$2" ;;
                     --release) HP_RELEASE="$2" ;;
                     --release-dir) HP_RELEASE_DIR="$2" ;;
+                    --notify-priority) HP_NOTICE_PRIORITY="$2"; HP_NOTICE_OPTION=1 ;;
                 esac
                 shift 2 ;;
             --refresh) HP_REFRESH=1; shift ;;
+            --human) HP_HUMAN=1; shift ;;
+            --no-notify) HP_NOTIFY=0; HP_NOTICE_OPTION=1; shift ;;
             --dry-run) HP_DRY_RUN=1; shift ;;
             --allow-modified) HP_ALLOW_MODIFIED=1; shift ;;
             --no-schedule) HP_SCHEDULE=0; shift ;;
@@ -1970,6 +2224,9 @@ hp_main() (
         esac
     done
     case "${mode}" in check|status|update|rollback|schedule) ;; *) return 2 ;; esac
+    if [[ "${HP_HUMAN}" == 1 && "${mode}" != status ]]; then hp_error '--human requires --update-status.'; return 2; fi
+    if [[ "${HP_NOTICE_OPTION}" == 1 && "${mode}" != check ]]; then hp_error 'Notification options require --check-update.'; return 2; fi
+    [[ "${HP_NOTICE_PRIORITY}" == -1 || "${HP_NOTICE_PRIORITY}" == 0 ]] || { hp_error 'Update notice priority must be -1 or 0.'; return 2; }
     if [[ "${mode}" != status && "${EUID}" != 0 ]]; then hp_error 'This operation requires root.'; return 1; fi
     [[ -z "${HP_RELEASE}" ]] || hp_valid_version "${HP_RELEASE}" || { hp_error 'Use a stable numeric release such as 2.0.0.'; return 2; }
     if [[ "${mode}" != update && ( -n "${HP_RELEASE}" || -n "${HP_RELEASE_DIR}" ) ]]; then hp_error 'Release selection is only valid with --update.'; return 2; fi
@@ -2031,7 +2288,7 @@ parse_args() {
                     --profile) PROFILE="$2"; profile_set=1 ;;
                 esac
                 shift 2 ;;
-            --setup|--validate|--test|--version|--check-in|--paths|--help|-h|--check-update|--update-status|--update|--rollback|--install-check-schedule)
+            --setup|--validate|--test|--version|--check-in|--paths|--doctor|--help|-h|--check-update|--update-status|--update|--rollback|--install-check-schedule)
                 mode_count=$((mode_count + 1))
                 case "$1" in
                     --setup) DO_SETUP=1 ;;
@@ -2040,6 +2297,7 @@ parse_args() {
                     --version) DO_VERSION=1 ;;
                     --check-in) DO_CHECK_IN=1 ;;
                     --paths) DO_PATHS=1 ;;
+                    --doctor) DO_DOCTOR=1 ;;
                     --help|-h) DO_HELP=1 ;;
                     --check-update) UPDATE_MODE=check ;;
                     --update-status) UPDATE_MODE=status ;;
@@ -2048,11 +2306,11 @@ parse_args() {
                     --install-check-schedule) UPDATE_MODE=schedule ;;
                 esac
                 shift ;;
-            --target|--state-dir|--release|--release-dir)
+            --target|--state-dir|--release|--release-dir|--notify-priority)
                 [[ "$#" -ge 2 ]] || { printf '%s requires a value\n' "$1" >&2; return 2; }
                 UPDATE_ARGS+=("$1" "$2")
                 shift 2 ;;
-            --refresh|--dry-run|--allow-modified|--no-schedule)
+            --refresh|--dry-run|--allow-modified|--no-schedule|--human|--no-notify)
                 UPDATE_ARGS+=("$1")
                 shift ;;
             --force-send) FORCE_SEND=1; shift ;;
@@ -2064,6 +2322,10 @@ parse_args() {
         return 2
     fi
     case "${PROFILE}" in auto|system|dsm) ;; *) printf 'Unknown profile: %s\n' "${PROFILE}" >&2; return 2 ;; esac
+    if [[ "${DO_DOCTOR}" == 1 ]]; then
+        [[ -z "${CALLER}${LEVEL}${MESSAGE}${TITLE}" && "${FORCE_SEND}" == 0 ]] || { printf 'Doctor cannot be combined with notification options.\n' >&2; return 2; }
+        return 0
+    fi
     if [[ -n "${UPDATE_MODE}" ]]; then
         if [[ -n "${CALLER}${LEVEL}${MESSAGE}${TITLE}" || "${FORCE_SEND}" == 1 || "${profile_set}" == 1 ]]; then
             printf 'Update commands cannot be combined with notification options.\n' >&2
@@ -2096,6 +2358,7 @@ send_health_check_in() {
 }
 
 main() {
+    if [[ "${1:-}" == --internal-update-notice ]]; then shift; send_update_notice "$@"; return $?; fi
     if [[ "$#" == 0 ]]; then
         initialize_profile || return 1
         handle_no_arguments
@@ -2107,6 +2370,7 @@ main() {
         return 0
     fi
     if [[ "${DO_HELP}" == 1 ]]; then usage; return 0; fi
+    if [[ "${DO_DOCTOR}" == 1 ]]; then run_doctor "${UPDATE_ARGS[@]}"; return $?; fi
     if [[ -n "${UPDATE_MODE}" ]]; then
         hp_main "${UPDATE_MODE}" "${UPDATE_ARGS[@]}"
         return $?

@@ -2,7 +2,7 @@
 
 Use the same `host-pushover.sh` on every device. The bootstrap recognizes the
 legacy system releases and DSM `2.00-dsm` through `2.03-dsm` as migration inputs,
-then switches the installation to unified `2.0.0` versioning. Existing paths,
+then switches the installation to unified versioning. Existing paths,
 configuration files, permissions, and notification jobs are retained.
 
 ## Prepare a pilot bundle
@@ -168,6 +168,13 @@ sudo /bin/bash "$target" --check-update --refresh
 /bin/bash "$target" --update-status
 ```
 
+On 2.1.0 and later, `--update-status --human` adds readable dates and recorded
+failure details. `--doctor` inspects local prerequisites and cached health
+without loading configuration or contacting either API. Run DSM diagnostics as
+the notification account. Existing daily root tasks automatically use the new
+checker after upgrading, including quiet update notices for subsequent releases.
+No schedule or configuration migration is required.
+
 Before any stable release exists, GitHub returns no downloadable manifest and the
 check reports unknown status with backoff. Offline pilot bundles remain usable.
 A successful check records the current or available version; it never installs.
@@ -219,8 +226,8 @@ On remaining hosts, obtain `upgrade-host-pushover.sh` from that release through
 the normal administrative distribution process. For reproducible rollout:
 
 ```bash
-sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.0.0 --dry-run
-sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.0.0
+sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.1.0 --dry-run
+sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.1.0
 ```
 
 Future upgrades use the installed script:

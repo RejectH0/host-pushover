@@ -8,6 +8,9 @@ import time
 from pathlib import Path
 
 args = sys.argv[1:]
+if "--version" in args:
+    print("curl 7.86.0 synthetic\nProtocols: http https\nFeatures: SSL")
+    sys.exit(0)
 root = Path(os.environ["HP_TEST_NETWORK"])
 with (root / "requests.jsonl").open("a") as stream:
     stream.write(json.dumps(args) + "\n")
@@ -45,7 +48,10 @@ if fault == "http-error":
 
 url = args[-1]
 if url.startswith("https://api.pushover.net/1/"):
-    respond(200, b'{"status":1,"request":"synthetic"}')
+    if fault == "notice-fail":
+        respond(400, b'{"status":0,"errors":["synthetic-private-response"]}')
+    else:
+        respond(200, b'{"status":1,"request":"synthetic"}')
 elif url.startswith("https://github.com/RejectH0/host-pushover/releases/"):
     if "/latest/" in url:
         version = (root / "latest").read_text().strip()

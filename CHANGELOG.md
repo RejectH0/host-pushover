@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.0 - 2026-09-07
+
+### Added
+
+- Pushover notices for newer stable releases, with per-version deduplication,
+  quiet priority by default, optional normal priority, and per-check suppression.
+- Delivery through a verified checker in a separate process; DSM configuration
+  is loaded only after switching to the installation owner's account.
+- Bounded notice retry eligibility, independent of GitHub discovery success.
+- Offline `--doctor` diagnostics for prerequisites, configuration permissions,
+  execution context, and cached update health without sourcing configuration.
+- `--update-status --human` with UTC dates and persistent, sanitized descriptions
+  of the last discovery failure and update-notice result.
+
+### Preserved
+
+- Existing configuration format, paths, setup, normal notification behavior,
+  machine-readable update status, and the four-field update manifest.
+- Compatibility with the 2.0.0 updater and existing scheduled checker commands.
+
 ## 2.0.0 - 2026-09-07
 
 ### Added

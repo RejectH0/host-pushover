@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import shutil
 import signal
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "host-pushover.sh").read_text()
+VERSION = re.search(r'^readonly SCRIPT_VERSION="([^"]+)"$', SOURCE, re.M).group(1)
 
 
 class Fixture(unittest.TestCase):
@@ -24,12 +26,15 @@ class Fixture(unittest.TestCase):
         self.network.mkdir()
         self.bin = self.base / "bin"
         self.bin.mkdir()
-        shutil.copyfile(ROOT / "tests/fake_curl.py", self.bin / "curl")
+        # The notifier intentionally clears inherited environment variables.
+        # Embed this closed stub's fixture directory so child delivery stays local.
+        (self.bin / "curl").write_text((ROOT / "tests/fake_curl.py").read_text().replace(
+            'Path(os.environ["HP_TEST_NETWORK"])', f'Path({str(self.network)!r})'))
         (self.bin / "curl").chmod(0o755)
         # Backoff remains observable but does not slow notification unit tests.
         (self.bin / "sleep").write_text("#!/bin/sh\nexit 0\n")
         (self.bin / "sleep").chmod(0o755)
-        self.env = dict(os.environ, PATH=f"{self.bin}:/usr/bin:/bin", HOME=str(self.base),
+        self.env = dict(os.environ, PATH=f"{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin", HOME=str(self.base),
                         HP_TEST_NETWORK=str(self.network))
         self.script = self.base / "host-pushover.sh"
         # Only the system fixture path changes, so no test can source live config.
@@ -71,8 +76,8 @@ class Fixture(unittest.TestCase):
     def release(self, version="2.0.0", body=None):
         directory = self.network / version
         directory.mkdir(exist_ok=True)
-        body = body or SOURCE.replace('readonly SCRIPT_VERSION="2.0.0"',
-                                       f'readonly SCRIPT_VERSION="{version}"')
+        body = body or self.script.read_text().replace(f'readonly SCRIPT_VERSION="{VERSION}"',
+                                                      f'readonly SCRIPT_VERSION="{version}"')
         (directory / "host-pushover.sh").write_text(body)
         checksum = hashlib.sha256(body.encode()).hexdigest()
         (directory / "update-manifest.txt").write_text(
@@ -102,7 +107,7 @@ class RuntimeTests(Fixture):
         env = self.env.copy()
         env.pop("HOME")
         result = self.run_script("--version", env=env)
-        self.assertEqual(result.stdout, "host-pushover.sh 2.0.0\n")
+        self.assertEqual(result.stdout, f"host-pushover.sh {VERSION}\n")
         self.assertEqual(self.requests(), [])
 
     def test_exclusive_modes(self):
@@ -169,7 +174,7 @@ class RuntimeTests(Fixture):
         result = self.run_script("--profile", "dsm", "--check-in")
         self.assertIn("Retrying", result.stderr)
         self.assertEqual(len(self.requests()), 3)  # validation retry, then delivery
-        self.assertTrue(any("2.0.0" in value for value in self.requests()[-1]))
+        self.assertTrue(any(VERSION in value for value in self.requests()[-1]))
 
     def test_system_retains_one_transport_attempt(self):
         self.configure("system")

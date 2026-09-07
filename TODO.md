@@ -1,11 +1,15 @@
 # TODO
 
-Stable `2.0.0` is published. The public discovery endpoint and conditional HTTP
-responses have been verified. Device validation and deployment records are
-maintained privately. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
+Version `2.1.0` adds update notices, local diagnostics, and readable update status.
+Device validation and deployment records are maintained privately.
+See [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
 ## Completed
 
+- [x] Add update notices with per-version deduplication, quiet delivery, safe DSM
+  account switching, and retry eligibility independent of discovery success.
+- [x] Add offline `--doctor` checks without sourcing configuration.
+- [x] Add readable update status with UTC dates and sanitized failure history.
 - [x] Move development into a normal user's workspace, preserve the original
   source for recovery, and replace the legacy remote/SSH configuration.
 - [x] Connect the public GitHub repository using a dedicated SSH key and public
@@ -55,7 +59,6 @@ maintained privately. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
 ## Future work
 
-- [ ] Optional once-per-release Pushover update notice with deduplication.
 - [ ] Independent manifest signature verification and a signing-key rotation
   process if supported by available deployment tools.
 - [ ] Fleet inventory/reporting beyond the local upgrade output.
