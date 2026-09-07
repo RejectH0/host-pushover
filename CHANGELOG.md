@@ -20,6 +20,9 @@
   prints a daily-task command for DSM or another scheduler.
 - Release builder, draft-release workflow, isolated runtime/update tests, and a
   Debian/Ubuntu CI matrix with BusyBox update coverage.
+- A prominently marked directory for RejectH0's personal migration tools, with
+  a generated bootstrap, explicit-opt-in execution wrapper, and reproducible
+  local upgrade archives that omit local owner metadata.
 
 ### Preserved
 

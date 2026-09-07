@@ -250,6 +250,10 @@ release only after the pilot. GitHub documents the
 [latest-release asset endpoint](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
 and [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
 
+**Maintainer tools: [RejectH0's private migration directory](maintainer/legacy-migration/README.md)
+is for personal maintainer use only. DO NOT DEPLOY that directory.** Its generated
+bootstrap and execution wrapper are separate from the installed runtime.
+
 Do not commit real hostnames, usernames, private paths, addresses, credentials,
 SSH keys, or deployment inventories. Use synthetic examples and keep local
 records outside the repository. Public service endpoints, the release repository,

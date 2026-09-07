@@ -2,7 +2,9 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
 python3 scripts/build-release.py
+cmp dist/upgrade-host-pushover.sh maintainer/legacy-migration/upgrade-host-pushover.sh
 bash -n host-pushover.sh
 bash -n dist/upgrade-host-pushover.sh
-shellcheck host-pushover.sh dist/upgrade-host-pushover.sh scripts/check.sh
+bash -n maintainer/legacy-migration/run-upgrade.sh
+shellcheck host-pushover.sh dist/upgrade-host-pushover.sh scripts/check.sh maintainer/legacy-migration/run-upgrade.sh
 python3 -m unittest discover -s tests -v

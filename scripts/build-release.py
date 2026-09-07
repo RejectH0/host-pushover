@@ -2,12 +2,15 @@
 """Build standalone release assets; Python is needed only on the build machine."""
 
 import argparse
+import gzip
 import hashlib
+import io
 import re
+import tarfile
 from pathlib import Path
 
 
-def build(destination: Path) -> None:
+def build(destination: Path, *, sync_maintainer: bool = False, archive: bool = False) -> None:
     root = Path(__file__).resolve().parents[1]
     script = (root / "host-pushover.sh").read_bytes()
     source = script.decode()
@@ -68,9 +71,34 @@ bootstrap_main "$@"
     checksums = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in files.items())
     (destination / "SHA256SUMS").write_text(checksums)
     print(f"Built v{version}: {len(manifest.encode())}-byte update manifest, {len(script)}-byte script")
+    if sync_maintainer:
+        mirror = root / "maintainer/legacy-migration/upgrade-host-pushover.sh"
+        mirror.parent.mkdir(parents=True, exist_ok=True)
+        mirror.write_bytes(files["upgrade-host-pushover.sh"])
+        mirror.chmod(0o755)
+        print("Updated the generated maintainer bootstrap copy.")
+    if archive:
+        files["SHA256SUMS"] = checksums.encode()
+        path = destination / f"host-pushover-{version}-upgrade.tar.gz"
+        with path.open("wb") as raw:
+            with gzip.GzipFile(fileobj=raw, mode="wb", filename="", mtime=0) as compressed:
+                with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
+                    for name, data in files.items():
+                        info = tarfile.TarInfo(name)
+                        info.size = len(data)
+                        info.mode = 0o755 if name.endswith(".sh") else 0o644
+                        info.uid = info.gid = info.mtime = 0
+                        info.uname = info.gname = ""
+                        bundle.addfile(info, io.BytesIO(data))
+        print(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("dist"))
-    build(parser.parse_args().output)
+    parser.add_argument("--sync-maintainer", action="store_true",
+                        help="Refresh the tracked bootstrap generated for maintainer use")
+    parser.add_argument("--archive", action="store_true",
+                        help="Also build a reproducible upgrade archive without local owner metadata")
+    args = parser.parse_args()
+    build(args.output, sync_maintainer=args.sync_maintainer, archive=args.archive)

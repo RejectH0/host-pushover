@@ -28,6 +28,8 @@ and fleet deployment remain separate steps. See [docs/ROLLOUT.md](docs/ROLLOUT.m
   and dependency reporting.
 - [x] Add release tooling, draft publication workflow, and GNU/BusyBox tests.
 - [x] Keep usage in README, completed changes in CHANGELOG, and plans here.
+- [x] Add clearly marked personal maintainer migration tools, require wrapper
+  opt-in, and check the generated bootstrap against the shared source in CI.
 
 ## Release validation and rollout
 
