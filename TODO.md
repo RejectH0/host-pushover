@@ -1,8 +1,8 @@
 # TODO
 
-Unified `2.0.0` is implemented. Release publication includes verification of the
-public discovery endpoint before broad rollout. Device validation and deployment
-records are maintained privately. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
+Stable `2.0.0` is published. The public discovery endpoint and conditional HTTP
+responses have been verified. Device validation and deployment records are
+maintained privately. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
 ## Completed
 
@@ -46,10 +46,10 @@ records are maintained privately. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
   run intentional notification check-ins, and rehearse rollback.
 - [ ] Confirm the daily check is active on each pilot. DSM needs a separate
   daily root task using the command printed by the installer.
-- [ ] Publish stable v2.0 with reviewed assets after CI and pilot sign-off.
+- [x] Publish stable v2.0 with reviewed assets after CI and pilot sign-off.
 - [ ] Confirm repository release immutability is enabled where available.
-- [ ] Verify conditional HTTP behavior against the actual published release
-  endpoint; offline tests already cover both 200 and 304 responses.
+- [x] Verify conditional HTTP behavior against the actual published release
+  endpoint: both 200 and 304 responses confirmed.
 - [ ] Roll out the pinned stable release and record each device's results in a
   private inventory outside Git.
 

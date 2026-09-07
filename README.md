@@ -4,8 +4,9 @@ A shared Pushover notification helper for Debian, Raspberry Pi OS, Ubuntu, and
 Synology DSM. **One `host-pushover.sh` serves every platform.** The legacy DSM
 variant has been absorbed into the unified script.
 
-The current version is **2.0.0**. Download release assets from
-[GitHub Releases](https://github.com/RejectH0/host-pushover/releases).
+The current stable release is
+[**2.0.0**](https://github.com/RejectH0/host-pushover/releases/tag/v2.0.0).
+Its standalone manifest is available through the update discovery URL below.
 See [docs/ROLLOUT.md](docs/ROLLOUT.md) for migration and deployment validation.
 
 ## Requirements and platform detection
