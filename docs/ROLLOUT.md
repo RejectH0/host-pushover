@@ -191,12 +191,29 @@ can continue reporting update availability after rollback to a legacy version.
 
 ## Publish and roll out
 
-After pilot validation, run **Prepare release draft** from GitHub Actions on
-`main`. It builds the assets from that commit after the test matrix succeeds.
-Review the draft, enable immutable releases, and publish it as the latest stable
-release. Never replace assets under an already published version: issue a new
-version instead. Do not distribute development-branch snapshots through the
-update endpoint.
+After pilot validation and release review, push a `v<VERSION>` tag matching the
+runtime version. The **Release** workflow runs the test matrix, builds and
+uploads all assets into a draft, publishes it as the latest stable release,
+then verifies the public manifest and live update discovery. A manual dispatch
+on `main` prepares an unpublished draft only; publish that draft after review.
+Enable immutable releases in repository settings where available. Never replace
+assets under an already published version: issue a new version instead.
+
+Before broad rollout, verify that the exact endpoint used by installed checkers
+returns the expected manifest:
+
+```bash
+curl --disable --fail --silent --show-error --location \
+  --proto '=https' --proto-redir '=https' \
+  --connect-timeout 5 --max-time 20 \
+  https://github.com/RejectH0/host-pushover/releases/latest/download/update-manifest.txt
+sudo /bin/bash "$target" --check-update --refresh
+```
+
+Publishing a migration prerelease or pushing source files does not publish this
+stable discovery endpoint. A `404` response means online discovery is incomplete;
+resolve publication before broad rollout. The installed script does not need
+replacement when the correct stable manifest becomes available.
 
 On remaining hosts, obtain `upgrade-host-pushover.sh` from that release through
 the normal administrative distribution process. For reproducible rollout:

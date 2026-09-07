@@ -4,9 +4,9 @@ A shared Pushover notification helper for Debian, Raspberry Pi OS, Ubuntu, and
 Synology DSM. **One `host-pushover.sh` serves every platform.** The legacy DSM
 variant has been absorbed into the unified script.
 
-The current development version is **2.0.0**. Release assets can be built and
-piloted locally; a stable GitHub release should be published after the hardware
-pilot in [docs/ROLLOUT.md](docs/ROLLOUT.md).
+The current version is **2.0.0**. Download release assets from
+[GitHub Releases](https://github.com/RejectH0/host-pushover/releases).
+See [docs/ROLLOUT.md](docs/ROLLOUT.md) for migration and deployment validation.
 
 ## Requirements and platform detection
 
@@ -175,6 +175,13 @@ ETags support `304 Not Modified`. The default successful-check interval is
 24 hours; failed attempts use bounded backoff. `--refresh` deliberately bypasses
 the interval. Message delivery never queries GitHub or waits for an update check.
 
+The exact discovery URL is
+[update-manifest.txt](https://github.com/RejectH0/host-pushover/releases/latest/download/update-manifest.txt).
+The builder generates this file under ignored `dist/`; publication attaches it
+as a separate release asset. It is not a file in the repository's Code tab.
+Verify this endpoint before broad rollout; a migration archive alone does not
+make online update discovery available.
+
 A root-owned state directory records the manifest, check times, retry state, and
 an `update-available` flag containing the newer version. The flag is separate
 from Pushover configuration. `--update-status` compares the installed version
@@ -245,9 +252,11 @@ checks. Actual NAS and Raspberry Pi hardware pilots remain separate.
 `python3 scripts/build-release.py` produces the runtime script, a standalone
 bootstrap generated from the same updater functions, `update-manifest.txt`, and
 `SHA256SUMS`; `--archive` also creates a portable upgrade tarball. The
-**Prepare release draft** GitHub Actions workflow runs the test matrix and
-attaches these assets and the tarball to an unpublished draft. Publish the stable
-release only after the pilot. GitHub documents the
+**Release** GitHub Actions workflow runs the test matrix and attaches these
+assets and the tarball to a draft. Pushing a reviewed `v<VERSION>` tag publishes
+that draft as the latest stable release and verifies the public manifest and
+live update discovery. Manual dispatch on `main` prepares a draft only.
+GitHub documents the
 [latest-release asset endpoint](https://docs.github.com/en/repositories/releasing-projects-on-github/linking-to-releases)
 and [immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases).
 

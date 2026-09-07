@@ -14,6 +14,13 @@ used on Debian, Raspberry Pi OS, and Ubuntu.
   without executing the old script or rewriting Pushover configuration.
 - Dry-run, pinned releases, and local release bundles support staged rollout.
 
-Before publishing this draft as stable, complete the real-device pilot in
-`docs/ROLLOUT.md`. Automated tests exercise isolated GNU/BusyBox environments;
-they do not establish compatibility with an untested NAS firmware or scheduler.
+The standalone `update-manifest.txt` release asset enables discovery through
+https://github.com/RejectH0/host-pushover/releases/latest/download/update-manifest.txt.
+The runtime and migration archive are identical to the reviewed
+`migration-v2.0.0-pilot.1` assets. Existing unified 2.0.0 installations already
+use this URL; no reinstall is needed. Root can invoke `--check-update --refresh`
+to bypass a cached failure after publication.
+
+Follow `docs/ROLLOUT.md` for deployment validation. Automated tests exercise
+isolated GNU/BusyBox environments; they do not establish compatibility with an
+untested NAS firmware or scheduler.

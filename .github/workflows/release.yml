@@ -1,17 +1,24 @@
-name: Prepare release draft
+name: Release
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
 
 permissions:
   contents: read
 
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
+
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
-  draft:
+  release:
     needs: test
-    if: github.ref == 'refs/heads/main'
+    if: github.repository == 'RejectH0/host-pushover' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -19,18 +26,58 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build release assets
-        run: python3 scripts/build-release.py --archive
-      - name: Create an unpublished draft with all assets
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Build and validate release assets
+        id: bundle
+        shell: bash
         run: |
           set -euo pipefail
           version_output="$(bash host-pushover.sh --version)"
           release_version="${version_output##* }"
-          gh release create "v${release_version}" \
-            --target "${GITHUB_SHA}" --draft --title "v${release_version}" \
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            [[ "${GITHUB_REF_NAME}" == "v${release_version}" ]]
+          fi
+          python3 scripts/build-release.py --archive
+          cmp dist/upgrade-host-pushover.sh maintainer/legacy-migration/upgrade-host-pushover.sh
+          printf 'version=%s\n' "${release_version}" >> "${GITHUB_OUTPUT}"
+      - name: Create an unpublished draft with all assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.bundle.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_options=(--target "${GITHUB_SHA}")
+          if [[ "${GITHUB_REF_TYPE}" == tag ]]; then
+            release_options=(--verify-tag)
+          fi
+          gh release create "v${RELEASE_VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" "${release_options[@]}" \
+            --draft --title "v${RELEASE_VERSION}" \
             --notes-file docs/RELEASE-NOTES.md \
             dist/host-pushover.sh dist/upgrade-host-pushover.sh \
             dist/update-manifest.txt dist/SHA256SUMS \
-            "dist/host-pushover-${release_version}-upgrade.tar.gz"
+            "dist/host-pushover-${RELEASE_VERSION}-upgrade.tar.gz"
+      - name: Publish the version tag as the latest stable release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.bundle.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release edit "v${RELEASE_VERSION}" --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag --draft=false --prerelease=false --latest
+      - name: Verify the public manifest and live update discovery
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --disable --fail --silent --show-error --location \
+            --proto '=https' --proto-redir '=https' \
+            --connect-timeout 5 --max-time 20 \
+            --retry 5 --retry-all-errors --retry-delay 5 \
+            --output dist/published-manifest.txt \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/update-manifest.txt"
+          cmp dist/update-manifest.txt dist/published-manifest.txt
+          sudo /bin/bash "${PWD}/host-pushover.sh" --check-update --refresh \
+            --state-dir /var/lib/host-pushover-release-check

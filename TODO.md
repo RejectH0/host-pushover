@@ -1,7 +1,8 @@
 # TODO
 
-Unified `2.0.0` is implemented and prepared for pilot validation. A stable release
-and fleet deployment remain separate steps. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
+Unified `2.0.0` is implemented. Release publication includes verification of the
+public discovery endpoint before broad rollout. Device validation and deployment
+records are maintained privately. See [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
 ## Completed
 
@@ -32,6 +33,8 @@ and fleet deployment remain separate steps. See [docs/ROLLOUT.md](docs/ROLLOUT.m
   opt-in, and check the generated bootstrap against the shared source in CI.
 - [x] Provide migration prerelease publication for direct HTTPS downloads,
   avoiding per-device SSH setup while retaining the separate stable channel.
+- [x] Publish reviewed version tags through CI, attach the standalone manifest,
+  and check the public discovery endpoint before release workflow success.
 
 ## Release validation and rollout
 
@@ -43,8 +46,8 @@ and fleet deployment remain separate steps. See [docs/ROLLOUT.md](docs/ROLLOUT.m
   run intentional notification check-ins, and rehearse rollback.
 - [ ] Confirm the daily check is active on each pilot. DSM needs a separate
   daily root task using the command printed by the installer.
-- [ ] Prepare the GitHub release draft after CI succeeds; review its assets,
-  enable release immutability, and publish stable v2.0 after pilot sign-off.
+- [ ] Publish stable v2.0 with reviewed assets after CI and pilot sign-off.
+- [ ] Confirm repository release immutability is enabled where available.
 - [ ] Verify conditional HTTP behavior against the actual published release
   endpoint; offline tests already cover both 200 and 304 responses.
 - [ ] Roll out the pinned stable release and record each device's results in a

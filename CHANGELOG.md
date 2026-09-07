@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased (2.0.0)
+## 2.0.0 - 2026-09-07
 
 ### Added
 
@@ -25,6 +25,8 @@
   local upgrade archives that omit local owner metadata.
 - CI-gated migration prereleases with public HTTPS downloads of the archive and
   execution wrapper, plus upgrade tarballs attached to future stable drafts.
+- Version-tag publication of stable releases with a separately downloadable
+  update manifest and a live discovery check before workflow success.
 
 ### Preserved
 
@@ -47,9 +49,8 @@
 - Usage and release history live in Markdown; private audit data stays outside
   the repository. Added the pilot, scheduling, and rollback guide.
 
-The script reports `2.0.0`; a stable release has not yet been published. Complete
-real-device pilot validation before publishing the draft. Historical version
-spellings below are preserved from the original release lineages.
+Historical version spellings below are preserved from the original release
+lineages.
 
 ## Debian releases
 
