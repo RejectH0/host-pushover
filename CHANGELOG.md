@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.2.0 - 2026-09-07
+
+### Added
+
+- Automatic retention of the recorded rollback backup after successful updates,
+  with local installation/checker verification before pruning superseded copies.
+- Root-only, offline `--prune-backups` and `--prune-backups --dry-run`, reporting
+  eligible files and bytes while protecting active recovery state.
+- Retention tests covering failed updates, dry runs, locking, damaged recovery
+  state, unexpected file types, user-owned installations, and BusyBox utilities.
+
+### Preserved
+
+- Existing configuration, notification behavior, updater state layout, manifest
+  format, and compatibility with direct updates from v2.0.0 and v2.1.0.
+- Failed installations and update dry runs keep all existing backups. Older
+  updaters require a separate cleanup invocation after first installing v2.2.0.
+
 ## 2.1.0 - 2026-09-07
 
 ### Added

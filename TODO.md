@@ -1,11 +1,17 @@
 # TODO
 
-Version `2.1.0` adds update notices, local diagnostics, and readable update status.
+Version `2.2.0` adds bounded backup retention and offline cleanup with a preview.
 Device validation and deployment records are maintained privately.
 See [docs/ROLLOUT.md](docs/ROLLOUT.md).
 
 ## Completed
 
+- [x] Retain the recorded rollback backup and prune superseded managed copies
+  only after successful installation and local verification.
+- [x] Provide offline root-only backup cleanup, including a dry-run preview and
+  protection against inconsistent recovery state and unexpected file types.
+- [x] Document the one-time cleanup needed after an older updater installs the
+  new retention implementation, including direct upgrades that skip a release.
 - [x] Add update notices with per-version deduplication, quiet delivery, safe DSM
   account switching, and retry eligibility independent of discovery success.
 - [x] Add offline `--doctor` checks without sourcing configuration.

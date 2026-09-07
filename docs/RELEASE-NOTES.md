@@ -1,22 +1,26 @@
-host-pushover v2.1.0 adds update notifications, offline diagnostics, and readable
-update status while preserving the existing system and DSM configuration layout.
+host-pushover v2.2.0 bounds script backup accumulation while keeping offline rollback.
 
-- Successful checks announce newer stable releases through Pushover. Notices
-  default to quiet priority, remember successful delivery per version, and retry
-  failed delivery on a later eligible check. Use --notify-priority 0 for normal
-  priority or --no-notify to suppress notices for a check.
-- DSM delivery runs as the installation owner using runuser or sudo. The root
-  checker streams verified code to that account before loading its configuration.
-- --doctor reports local PASS/WARN/FAIL diagnostics without sourcing
-  configuration, making network requests, or sending notifications.
-- --update-status --human shows UTC dates, cached availability, the last recorded
-  discovery failure, and any update-notice result. Default output is unchanged.
+- Updates performed by this version retain the backup referenced by the rollback
+  record and prune superseded managed script backups only after successful
+  installation, checker setup, and local integrity verification.
+- New root-only --prune-backups and --prune-backups --dry-run commands provide
+  offline cleanup and a preview of eligible files and bytes.
+- The recorded backup is protected regardless of age. Inconsistent recovery or
+  installed state prevents deletion; unexpected files and links are skipped.
+- Failed installations and update dry runs preserve all backups. Configuration
+  backups and active updater files are outside the cleanup scope.
 
-The existing v2.0.0 updater can install this release. Existing scheduled tasks
-continue using the replaced checker. Automatic update notices become available
-for releases discovered after installing v2.1.0; v2.0.0 detects this release using
-its original update flag and status command. Root must explicitly invoke --update
-to install. Configuration files and script ownership/mode are preserved.
+Both v2.0.0 and v2.1.0 can upgrade directly to this release. An older updater
+cannot apply the new retention policy during its first installation of v2.2.0.
+After that update, run --prune-backups --dry-run and then --prune-backups using
+the newly installed script as root to remove accumulated backups. Subsequent
+updates perform retention automatically. See README.md and docs/ROLLOUT.md for
+the complete command sequence.
+
+The existing configuration, daily task commands, version comparison, and
+four-field manifest remain compatible. Hosts already running v2.1.0 can send
+an update-available notice for this release; v2.0.0 uses its original flag/status.
+Installation continues to require an explicit root --update invocation.
 
 The standalone manifest is attached to this release and published through:
 https://github.com/RejectH0/host-pushover/releases/latest/download/update-manifest.txt

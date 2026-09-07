@@ -37,21 +37,24 @@ Upgrade an existing host-pushover installation to a unified release.
 
 Usage: upgrade-host-pushover.sh --target <installed-script> [options]
        upgrade-host-pushover.sh --rollback --target <installed-script>
+       upgrade-host-pushover.sh --prune-backups --target <installed-script> [--dry-run]
 
 Run as root. Options:
-  --dry-run             Download and verify without replacing the installed script
+  --dry-run             Preview the selected operation without changing scripts/backups
   --release <version>   Pin a stable release, for example 2.0.0
   --release-dir <dir>   Use a local release bundle for an offline pilot
   --state-dir <dir>     Root-owned updater state (default: /var/lib/host-pushover)
   --allow-modified      Explicitly replace a locally edited managed installation
   --no-schedule         Skip automatic cron setup / DSM scheduling instructions
 
-The original script is backed up. Pushover configuration and existing callers
-are preserved. Symlinked directories are resolved; final script symlinks and
+The original script is backed up. Successful verified updates retain that
+rollback backup and prune superseded managed script backups. Pushover
+configuration and existing callers are preserved. Symlinked directories are resolved; final script symlinks and
 multiple hard links are refused. DSM receives the same script as other Linux.
 HELP
             return 0 ;;
         --rollback) mode=rollback; shift ;;
+        --prune-backups) mode=prune; shift ;;
     esac
     hp_main "${mode}" "$@"
 }

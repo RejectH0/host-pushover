@@ -5,7 +5,7 @@ Synology DSM. **One `host-pushover.sh` serves every platform.** The legacy DSM
 variant has been absorbed into the unified script.
 
 The current stable release is
-[**2.1.0**](https://github.com/RejectH0/host-pushover/releases/tag/v2.1.0).
+[**2.2.0**](https://github.com/RejectH0/host-pushover/releases/tag/v2.2.0).
 Its standalone manifest is available through the update discovery URL below.
 See [docs/ROLLOUT.md](docs/ROLLOUT.md) for migration and deployment validation.
 
@@ -289,6 +289,47 @@ unmanaged installation has no authoritative stored baseline checksum; its
 original bytes are retained in the backup. Final script symlinks and multiple
 hard links are refused, while directory aliases are resolved consistently.
 Downgrades are refused; use the recorded rollback procedure instead.
+
+### Backup retention
+
+Updates performed by v2.2.0 or newer retain the script backup referenced by the
+rollback record, regardless of its age, and remove superseded managed script
+backups after installation, checker setup, and local integrity verification
+succeed. The retained copy provides offline recovery of the exact previous
+installation, including legacy code. Failed installations and update dry runs
+preserve all backups. Routine update checks do not prune backups.
+
+Review and clean up an existing installation as root without network access:
+
+```bash
+sudo /bin/bash "$target" --prune-backups --dry-run
+sudo /bin/bash "$target" --prune-backups
+```
+
+Set `target` to the existing installed script. Cleanup verifies the recorded
+backup, installed script, checksum receipt, ownership/modes, and scheduled
+checker under the updater lock. Missing or inconsistent recovery/install state
+prevents deletion. Only recognizable root-private script backups are eligible;
+unexpected file types or contents are skipped with a warning. Configuration
+backups, active updater files, and other installations are outside its scope.
+Cleanup errors are reported; an automatic cleanup error does not undo a verified
+installation. The retained rollback copy is never a deletion candidate.
+
+**First upgrade from v2.0.0 or v2.1.0:** that invocation still runs the older
+updater, so run the new cleanup command afterward to remove accumulated backups.
+Both versions can upgrade directly to v2.2.0 without installing intermediate
+releases. With `target` set to the existing script:
+
+```bash
+sudo /bin/bash "$target" --update --dry-run &&
+sudo /bin/bash "$target" --update &&
+sudo /bin/bash "$target" --prune-backups --dry-run &&
+sudo /bin/bash "$target" --prune-backups
+```
+
+Subsequent updates run the retention policy automatically. Configuration and
+scheduled task commands require no changes. Hosts running v2.1.0 can announce
+this release; v2.0.0 still uses its original update flag/status until upgraded.
 
 HTTPS and the selected public repository are the release trust boundary. A
 checksum from the same release detects corruption or mixed assets; it does not

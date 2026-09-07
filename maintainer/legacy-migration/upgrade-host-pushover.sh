@@ -460,6 +460,80 @@ hp_finish_install() {
     fi
 }
 
+hp_verify_managed_install() {
+    local expected="$1" uid="$2" gid="$3" mode="$4" receipt="${HP_PRIVATE}/installed-sha256" checker="${HP_PRIVATE}/checker.sh"
+    [[ "${expected}" =~ ^[a-f0-9]{64}$ ]] || return 1
+    [[ -f "${HP_TARGET_FILE}" && ! -L "${HP_TARGET_FILE}" && "$(stat -c '%u:%g:%a:%h' "${HP_TARGET_FILE}")" == "${uid}:${gid}:${mode}:1" ]] || return 1
+    [[ "$(stat -c '%d:%i' "${HP_TARGET%/*}")" == "${HP_PARENT_ID}" && "$(hp_sha256 "${HP_TARGET_FILE}")" == "${expected}" ]] || return 1
+    [[ -f "${receipt}" && ! -L "${receipt}" && "$(stat -c '%u:%a:%h' "${receipt}")" == 0:600:1 && "$(hp_read_small "${receipt}")" == "${expected}" ]] || return 1
+    [[ -f "${checker}" && ! -L "${checker}" && "$(stat -c '%u:%a:%h' "${checker}")" == 0:700:1 && "$(hp_sha256 "${checker}")" == "${expected}" ]] || return 1
+    hp_valid_version "$(hp_read_version "${HP_TARGET_FILE}")" && bash -n "${HP_TARGET_FILE}"
+}
+
+hp_prune_backups() {
+    local -a record candidates=()
+    local rollback="${HP_PRIVATE}/rollback" backup old_hash new_hash uid gid mode version file name size total=0
+    # The rollback pointer, not a timestamp or modification time, selects the
+    # protected backup. Refuse cleanup if a complete installation cannot be verified.
+    if [[ ! -f "${rollback}" || -L "${rollback}" ]] \
+        || [[ "$(stat -c '%u:%a:%h' "${rollback}")" != 0:600:1 || "$(stat -c %s "${rollback}")" -gt 1024 ]]; then
+        hp_error 'No trusted rollback record; all backups preserved.'; return 1
+    fi
+    mapfile -t record < "${rollback}"
+    [[ "${#record[@]}" == 7 ]] || { hp_error 'Invalid rollback record; all backups preserved.'; return 1; }
+    backup="${record[0]}" old_hash="${record[1]}" new_hash="${record[2]}"
+    uid="${record[3]}" gid="${record[4]}" mode="${record[5]}" version="${record[6]}"
+    if [[ ! "${backup}" =~ ^backup-[0-9]{8}T[0-9]{6}Z-[0-9]+\.sh$ || ! "${old_hash}" =~ ^[a-f0-9]{64}$ || ! "${new_hash}" =~ ^[a-f0-9]{64}$ \
+        || ! "${uid}" =~ ^[0-9]+$ || ! "${gid}" =~ ^[0-9]+$ || ! "${mode}" =~ ^[0-7]{3}$ ]]; then
+        hp_error 'Invalid rollback metadata; all backups preserved.'; return 1
+    fi
+    hp_valid_version "${version}" || hp_legacy_version "${version}" || { hp_error 'Invalid rollback version; all backups preserved.'; return 1; }
+    file="${HP_PRIVATE}/${backup}"
+    if [[ ! -f "${file}" || -L "${file}" ]] || [[ "$(stat -c '%u:%a:%h' "${file}")" != 0:600:1 ]] \
+        || [[ "$(hp_sha256 "${file}")" != "${old_hash}" || "$(hp_read_version "${file}")" != "${version}" ]] || ! bash -n "${file}"; then
+        hp_error 'Recorded rollback backup failed verification; all backups preserved.'; return 1
+    fi
+    if ! hp_verify_managed_install "${new_hash}" "${uid}" "${gid}" "${mode}"; then
+        hp_error 'Installed script or checker does not match a completed update; all backups preserved.'; return 1
+    fi
+    printf 'Retaining rollback backup: %s\n' "${file}"
+    for file in "${HP_PRIVATE}"/backup-*.sh; do
+        name="${file##*/}"
+        [[ "${name}" != "${backup}" && "${name}" =~ ^backup-[0-9]{8}T[0-9]{6}Z-[0-9]+\.sh$ ]] || continue
+        # Only recognizable root-private script backups are eligible. Leave
+        # symlinks, hard links, directories, and unrelated or damaged files alone.
+        if [[ ! -f "${file}" || -L "${file}" ]] || [[ "$(stat -c '%u:%a:%h' "${file}")" != 0:600:1 ]] \
+            || ! hp_read_version "${file}" >/dev/null || ! bash -n "${file}" 2>/dev/null; then
+            printf 'Skipping unrecognized or unsafe backup entry: %s\n' "${name}" >&2
+            continue
+        fi
+        size="$(stat -c %s "${file}")" || return 1
+        total=$((total + size))
+        candidates+=("${file}")
+    done
+    if [[ "${HP_DRY_RUN}" == 1 ]]; then
+        for file in "${candidates[@]}"; do printf 'Would remove: %s\n' "${file}"; done
+        printf 'Dry run: would remove %s superseded backup(s), %s bytes; all backups unchanged.\n' "${#candidates[@]}" "${total}"
+        return 0
+    fi
+    for file in "${candidates[@]}"; do
+        rm -- "${file}" || { hp_error 'Backup cleanup incomplete; the recorded rollback backup is retained.'; return 1; }
+    done
+    printf 'Removed %s superseded backup(s), %s bytes; recorded rollback backup retained.\n' "${#candidates[@]}" "${total}"
+}
+
+hp_finish_update() {
+    hp_finish_install || return 1
+    hp_verify_managed_install "${HP_SHA}" "$1" "$2" "$3" || { hp_error 'Post-install verification failed; all backups preserved.'; return 1; }
+    # An already-current unmanaged target may have no rollback record yet.
+    if [[ -e "${HP_PRIVATE}/rollback" || -L "${HP_PRIVATE}/rollback" ]]; then
+        if ! hp_prune_backups; then
+            printf 'Installation verified; backup cleanup needs attention. Inspect --prune-backups --dry-run.\n' >&2
+        fi
+    fi
+    return 0
+}
+
 hp_write_cron() {
     local cron_dir="$1" command="$2" identity minute hour cron_path staged
     hp_trusted_directory "${cron_dir}" || return 1
@@ -518,7 +592,7 @@ hp_update() {
     hp_get_candidate || return 1
     if [[ "${installed}" == "${HP_VERSION}" && "${original_hash}" == "${HP_SHA}" ]]; then
         printf 'Already installed: %s\n' "${installed}"
-        if [[ "${HP_DRY_RUN}" == 0 ]]; then hp_finish_install || return 1; fi
+        if [[ "${HP_DRY_RUN}" == 0 ]]; then hp_finish_update "${uid}" "${gid}" "${mode}" || return 1; fi
         return 0
     fi
     if [[ "${installed}" == "${HP_VERSION}" && "${HP_ALLOW_MODIFIED}" == 0 ]]; then
@@ -537,7 +611,7 @@ hp_update() {
     hp_publish_file "${HP_WORK}/rollback" "${HP_PRIVATE}/rollback" || return 1
     hp_install_file "${HP_WORK}/candidate" "${uid}" "${gid}" "${mode}" "${original_hash}" || return 1
     printf 'Installed %s. Backup: %s\n' "${HP_VERSION}" "${HP_PRIVATE}/${backup}"
-    hp_finish_install
+    hp_finish_update "${uid}" "${gid}" "${mode}"
 }
 
 hp_rollback() {
@@ -596,7 +670,7 @@ hp_main() (
             *) hp_error "Unknown update option: $1"; return 2 ;;
         esac
     done
-    case "${mode}" in check|status|update|rollback|schedule) ;; *) return 2 ;; esac
+    case "${mode}" in check|status|update|rollback|schedule|prune) ;; *) return 2 ;; esac
     if [[ "${HP_HUMAN}" == 1 && "${mode}" != status ]]; then hp_error '--human requires --update-status.'; return 2; fi
     if [[ "${HP_NOTICE_OPTION}" == 1 && "${mode}" != check ]]; then hp_error 'Notification options require --check-update.'; return 2; fi
     [[ "${HP_NOTICE_PRIORITY}" == -1 || "${HP_NOTICE_PRIORITY}" == 0 ]] || { hp_error 'Update notice priority must be -1 or 0.'; return 2; }
@@ -604,7 +678,8 @@ hp_main() (
     [[ -z "${HP_RELEASE}" ]] || hp_valid_version "${HP_RELEASE}" || { hp_error 'Use a stable numeric release such as 2.0.0.'; return 2; }
     if [[ "${mode}" != update && ( -n "${HP_RELEASE}" || -n "${HP_RELEASE_DIR}" ) ]]; then hp_error 'Release selection is only valid with --update.'; return 2; fi
     if [[ "${HP_REFRESH}" == 1 && "${mode}" != check ]]; then hp_error '--refresh requires --check-update.'; return 2; fi
-    if [[ "${mode}" != update && "${mode}" != rollback && ( "${HP_DRY_RUN}" == 1 || "${HP_ALLOW_MODIFIED}" == 1 ) ]]; then hp_error '--dry-run/--allow-modified require update or rollback.'; return 2; fi
+    if [[ "${mode}" != update && "${mode}" != rollback && "${mode}" != prune && "${HP_DRY_RUN}" == 1 ]]; then hp_error '--dry-run requires update, rollback, or backup cleanup.'; return 2; fi
+    if [[ "${mode}" != update && "${mode}" != rollback && "${HP_ALLOW_MODIFIED}" == 1 ]]; then hp_error '--allow-modified requires update or rollback.'; return 2; fi
     for cmd in stat sha256sum date; do command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}"); done
     if [[ "${mode}" != status ]]; then
         for cmd in bash cp mv mkdir rmdir mktemp chmod chown rm; do command -v "${cmd}" >/dev/null 2>&1 || missing+=("${cmd}"); done
@@ -642,6 +717,7 @@ hp_main() (
         check) hp_check ;;
         update) hp_update ;;
         rollback) hp_rollback ;;
+        prune) hp_prune_backups ;;
         schedule) hp_schedule ;;
     esac
 )
@@ -655,21 +731,24 @@ Upgrade an existing host-pushover installation to a unified release.
 
 Usage: upgrade-host-pushover.sh --target <installed-script> [options]
        upgrade-host-pushover.sh --rollback --target <installed-script>
+       upgrade-host-pushover.sh --prune-backups --target <installed-script> [--dry-run]
 
 Run as root. Options:
-  --dry-run             Download and verify without replacing the installed script
+  --dry-run             Preview the selected operation without changing scripts/backups
   --release <version>   Pin a stable release, for example 2.0.0
   --release-dir <dir>   Use a local release bundle for an offline pilot
   --state-dir <dir>     Root-owned updater state (default: /var/lib/host-pushover)
   --allow-modified      Explicitly replace a locally edited managed installation
   --no-schedule         Skip automatic cron setup / DSM scheduling instructions
 
-The original script is backed up. Pushover configuration and existing callers
-are preserved. Symlinked directories are resolved; final script symlinks and
+The original script is backed up. Successful verified updates retain that
+rollback backup and prune superseded managed script backups. Pushover
+configuration and existing callers are preserved. Symlinked directories are resolved; final script symlinks and
 multiple hard links are refused. DSM receives the same script as other Linux.
 HELP
             return 0 ;;
         --rollback) mode=rollback; shift ;;
+        --prune-backups) mode=prune; shift ;;
     esac
     hp_main "${mode}" "$@"
 }

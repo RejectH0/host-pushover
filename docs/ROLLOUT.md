@@ -192,8 +192,9 @@ sudo /bin/bash ./upgrade-host-pushover.sh --rollback --target "$target"
 
 The most recent backup is verified against its stored checksum and metadata.
 Locally modified managed scripts require explicit review and `--allow-modified`.
-Configuration remains intact. Older backup files are retained for manual recovery;
-the rollback command selects the latest recorded backup. A root-owned checker
+Configuration remains intact. Starting with the v2.2.0 updater, a verified
+successful update retains the backup referenced by the rollback record and
+prunes superseded managed script copies. A root-owned checker
 can continue reporting update availability after rollback to a legacy version.
 
 ## Publish and roll out
@@ -226,16 +227,28 @@ On remaining hosts, obtain `upgrade-host-pushover.sh` from that release through
 the normal administrative distribution process. For reproducible rollout:
 
 ```bash
-sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.1.0 --dry-run
-sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.1.0
+sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.2.0 --dry-run
+sudo /bin/bash ./upgrade-host-pushover.sh --target "$target" --release 2.2.0
 ```
 
-Future upgrades use the installed script:
+Hosts already running v2.0.0 or v2.1.0 can upgrade directly using their installed
+script. Intermediate releases are not required. The older updater cannot prune
+backups during its first installation of v2.2.0, so complete that transition with
+the new offline cleanup command:
 
 ```bash
-sudo /bin/bash "$target" --update --dry-run
-sudo /bin/bash "$target" --update
+sudo /bin/bash "$target" --update --dry-run &&
+sudo /bin/bash "$target" --update &&
+sudo /bin/bash "$target" --prune-backups --dry-run &&
+sudo /bin/bash "$target" --prune-backups
 ```
+
+The preview reports which superseded backups will be removed. The recorded
+rollback backup is retained regardless of age. Invalid or incomplete managed
+state prevents cleanup; unexpected entries are skipped. Updates performed by
+v2.2.0 or newer apply retention automatically after installation and verification
+succeed. Failed installations and update dry runs keep all backups. Existing
+configuration and scheduler commands require no changes.
 
 Record each device's previous/new version, target, checksum, backup location,
 configuration verification, and check-in result in a private inventory. Retire

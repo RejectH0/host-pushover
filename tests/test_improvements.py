@@ -7,6 +7,10 @@ import unittest
 
 from test_host_pushover import Fixture, VERSION
 
+_VERSION_PARTS = list(map(int, VERSION.split(".")))
+NEXT_VERSION = f"{_VERSION_PARTS[0]}.{_VERSION_PARTS[1] + 1}.0"
+LATER_VERSION = f"{_VERSION_PARTS[0]}.{_VERSION_PARTS[1] + 2}.0"
+
 
 class DiagnosticsTests(Fixture):
     def test_doctor_is_offline_and_does_not_execute_configuration(self):
@@ -46,7 +50,9 @@ class DiagnosticsTests(Fixture):
                      ("--doctor", "--refresh"), ("--human", "--version"),
                      ("--check-update", "--human"), ("--update", "--no-notify"),
                      ("--check-update", "--notify-priority", "2"),
-                     ("--internal-update-notice", "invalid")):
+                     ("--internal-update-notice", "invalid"),
+                     ("--prune-backups", "--update"), ("--prune-backups", "--allow-modified"),
+                     ("--prune-backups", "--refresh"), ("--prune-backups", "--release", VERSION)):
             with self.subTest(args=args):
                 self.run_script(*args, success=False)
         self.assertEqual(self.requests(), [])
@@ -78,33 +84,33 @@ class ImprovedUpdateTests(Fixture):
 
     def test_update_notice_deduplicates_and_honors_priority_and_suppression(self):
         target = self.managed()
-        self.release("2.2.0")
+        self.release(NEXT_VERSION)
         self.command(target, "--check-update", "--no-notify")
         self.assertEqual(self.notices(), [])
         self.command(target, "--check-update")  # Cached discovery still permits delivery.
         self.assertEqual(len(self.notices()), 1)
         self.assertIn("priority=-1", self.notices()[0])
-        self.assertTrue(any("installed=" + VERSION in value and "available=2.2.0" in value
+        self.assertTrue(any("installed=" + VERSION in value and "available=" + NEXT_VERSION in value
                             for value in self.notices()[0]))
-        marker = self.target_state(target) / "private/notified-2.2.0"
+        marker = self.target_state(target) / f"private/notified-{NEXT_VERSION}"
         self.assertTrue(marker.is_file())
         self.command(target, "--check-update", "--refresh")
         self.assertEqual(len(self.notices()), 1)
-        self.release("2.3.0")
+        self.release(LATER_VERSION)
         self.command(target, "--check-update", "--refresh", "--notify-priority", "0")
         self.assertEqual(len(self.notices()), 2)
         self.assertIn("priority=0", self.notices()[-1])
 
     def test_failed_notice_retries_without_poisoning_discovery(self):
         target = self.managed()
-        self.release("2.2.0")
+        self.release(NEXT_VERSION)
         (self.network / "fault").write_text("notice-fail")
         result = self.command(target, "--check-update")
         self.assertIn("cache=fresh", result.stdout)
         self.assertIn("update_available=true", result.stdout)
         self.assertEqual(len(self.notices()), 1)
         state = self.target_state(target)
-        self.assertFalse((state / "private/notified-2.2.0").exists())
+        self.assertFalse((state / f"private/notified-{NEXT_VERSION}").exists())
         self.assertGreater(int((state / "notice-next").read_text()), time.time())
         human = self.command(target, "--update-status", "--human").stdout
         self.assertIn("delivery failed", human)
@@ -115,14 +121,14 @@ class ImprovedUpdateTests(Fixture):
         (state / "notice-next").write_text("0\n")
         self.command(target, "--check-update")
         self.assertEqual(len(self.notices()), 2)
-        self.assertTrue((state / "private/notified-2.2.0").is_file())
+        self.assertTrue((state / f"private/notified-{NEXT_VERSION}").is_file())
 
     def test_disabled_notices_and_tampered_checker_are_not_marked_sent(self):
         target = self.managed()
         config = self.system_config / "config"
         with config.open("a") as stream:
             stream.write("PUSHOVER_ENABLED=false\n")
-        self.release("2.2.0")
+        self.release(NEXT_VERSION)
         self.command(target, "--check-update")
         state = self.target_state(target)
         self.assertEqual((state / "notice-status").read_text(), "disabled\n")
@@ -134,7 +140,7 @@ class ImprovedUpdateTests(Fixture):
         self.command(target, "--check-update")
         self.assertEqual((state / "notice-status").read_text(), "unavailable\n")
         self.assertFalse(marker.exists())
-        self.assertFalse((state / "private/notified-2.2.0").exists())
+        self.assertFalse((state / f"private/notified-{NEXT_VERSION}").exists())
 
     def test_human_status_retains_failure_details_after_recovery(self):
         target = self.target("2.0.0")
@@ -181,7 +187,7 @@ class ImprovedUpdateTests(Fixture):
         target = self.target("2.03-dsm")
         os.chown(target, account.pw_uid, account.pw_gid)
         self.command(target, "--update", "--release-dir", self.release(VERSION))
-        self.release("2.2.0")
+        self.release(NEXT_VERSION)
         request_log = self.network / "requests.jsonl"
         request_log.touch()
         request_log.chmod(0o666)
@@ -192,7 +198,7 @@ class ImprovedUpdateTests(Fixture):
         self.assertEqual((user_home / "config-uid").read_text(), str(account.pw_uid))
         self.assertEqual(len(self.notices()), 1)
         self.assertFalse(marker.exists())
-        self.assertTrue((self.target_state(target) / "private/notified-2.2.0").is_file())
+        self.assertTrue((self.target_state(target) / f"private/notified-{NEXT_VERSION}").is_file())
 
     def test_dsm_notice_supports_sudo_when_runuser_is_unavailable(self):
         if not shutil.which("sudo"):
